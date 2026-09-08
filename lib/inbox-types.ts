@@ -10,12 +10,18 @@ export type MessageSender = "user" | "ai" | "agent";
 /**
  * Entrega del mensaje saliente DENTRO DE ESTE INBOX: `pending` mientras la
  * petición de envío está en vuelo, `confirmed` cuando la fila ya existe en la
- * base.
+ * base, `failed` cuando sabemos que NO existe.
  *
  * OJO: `confirmed` significa "quedó guardado", NO "le llegó al huésped". La
  * entrega real solo la sabe Meta y vive en `MessageDeliveryReceipt`.
+ *
+ * `failed` solo se pinta con evidencia: o el engine garantizó que no envió, o
+ * preguntamos por `client_temp_id` y la fila no está. Nunca por vencimiento de
+ * un temporizador ni por un error del que no sepamos el desenlace — decirle
+ * "No se envió" a la recepcionista sin saberlo la empuja a reenviar, y eso le
+ * duplica el mensaje al huésped.
  */
-export type MessageDeliveryStatus = "pending" | "confirmed";
+export type MessageDeliveryStatus = "pending" | "confirmed" | "failed";
 
 /** Estados de entrega que reporta Meta por webhook, de menos a más avanzado. */
 export type MetaDeliveryStatus = "sent" | "delivered" | "read" | "failed";

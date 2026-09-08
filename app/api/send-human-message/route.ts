@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
 import { requireSessionUser } from "@/lib/auth/require-user";
 import { assertConversationInHotel, requireActiveHotel } from "@/lib/auth/require-hotel";
-import { attachWamidByClientTempId, extractWamid } from "@/lib/outbound-wamid";
+import {
+  attachWamidByClientTempId,
+  extractWamid,
+  findOutboundByClientTempId,
+} from "@/lib/outbound-wamid";
 import { readEngineError } from "@/lib/engine-error";
 import { DEFAULT_COMPOSER_LANGUAGE, normalizeLanguageCode } from "@/lib/language-names";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
@@ -95,6 +99,8 @@ export async function POST(request: Request) {
       conversationId?: string;
       hotelId?: string | null;
       clientTempId?: string;
+      /** `true` solo desde el botón "Reintentar" de una burbuja fallida. */
+      isRetry?: boolean;
       /**
        * ISO 639-1 del idioma en que la asesora quiere que SALGA el mensaje. Ella
        * siempre escribe en español: si viene otro idioma, el engine traduce
@@ -124,6 +130,12 @@ export async function POST(request: Request) {
     }
 
     const clientTempId = body.clientTempId?.trim() || null;
+    /**
+     * La bandeja marca así los envíos que salen del botón "Reintentar". Sube el
+     * listón del candado de idempotencia: en un reintento, "no sé" se trata como
+     * "no reenviar". Ver el candado más abajo.
+     */
+    const isRetry = body.isRetry === true;
 
     // GATE de tenancy completo, ANTES del fetch al engine (este endpoint no
     // escribe en DB; el engine hace la inserción, por eso no hay candado de
@@ -154,7 +166,42 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "hotelId es obligatorio" }, { status: 400 });
     }
 
-    // 3) config de WhatsApp derivada del hotel autoritativo, nunca del cliente.
+    // 3) CANDADO DE IDEMPOTENCIA. Antes de tocar el engine: si ya existe una
+    // fila saliente con este `client_temp_id` en este hotel, el mensaje YA le
+    // salió al huésped y volver a enviarlo se lo duplicaría. Cubre el doble
+    // clic, el botón "Reintentar" de una burbuja que en realidad sí se envió, y
+    // el reintento después de una respuesta HTTP perdida.
+    //
+    // Cuando NO podemos verificar (la consulta falló), la decisión depende de si
+    // esto es un primer envío o un reintento:
+    //
+    // - Primer envío: se manda igual. Bloquearlo dejaría la bandeja muda cada
+    //   vez que la base tosa, y no entregar es peor que entregar dos veces.
+    // - Reintento: NO se manda. Acá el mensaje puede perfectamente estar ya
+    //   enviado —por eso hay un reintento— y reenviar a ciegas es justo lo que
+    //   le duplica el WhatsApp al huésped.
+    if (clientTempId) {
+      const already = await findOutboundByClientTempId({ clientTempId, hotelId });
+      if (already.status === "found") {
+        return NextResponse.json({
+          ok: true,
+          alreadySent: true,
+          messageId: already.messageId,
+          whatsappMessageId: already.wamid,
+        });
+      }
+      if (already.status === "unknown" && isRetry) {
+        return NextResponse.json(
+          {
+            error:
+              "No pudimos verificar si este mensaje ya se había enviado, así que no se reenvió para no duplicárselo al huésped. Intenta de nuevo en un momento.",
+          },
+          { status: 503 }
+        );
+      }
+    }
+
+    // 4) config de WhatsApp derivada del hotel autoritativo, nunca del cliente.
     const hotelWhatsapp = await readHotelWhatsappConfig(hotelId);
 
     // Español = camino de siempre: el campo NO viaja y el engine hace
@@ -232,7 +279,12 @@ export async function POST(request: Request) {
       await attachWamidByClientTempId({ wamid, clientTempId, hotelId });
     }
 
-    return NextResponse.json({ ok: true });
+    // El `wamid` viaja de vuelta a la bandeja: es lo que le permite apagar el
+    // reloj de "Enviando…" con esta respuesta y cruzar la burbuja contra los
+    // acuses de Meta sin esperar el eco de Realtime. Antes se calculaba acá y se
+    // botaba, y la burbuja quedaba dependiendo de un evento sin acuse ni
+    // reintento: cualquier corte de red la dejaba pegada hasta refrescar.
+    return NextResponse.json({ ok: true, whatsappMessageId: wamid ?? null });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Error desconocido";
     return NextResponse.json({ error: msg }, { status: 500 });

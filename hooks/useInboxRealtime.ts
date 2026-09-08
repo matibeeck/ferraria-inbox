@@ -34,8 +34,26 @@ type SetConversations = Dispatch<SetStateAction<Conversation[]>>;
 type ConversationsPayload = RealtimePostgresChangesPayload<ConversationDbRow>;
 type WubbyPayload = RealtimePostgresChangesPayload<WubbyWhatsappRow>;
 
-/** Estado visible del chip de conexión Realtime en la barra superior. */
-export type RealtimeUiStatus = "waiting" | "connected" | "error";
+/**
+ * Estado visible del chip de conexión Realtime en la barra superior.
+ *
+ * `reconnecting` no es cosmético: cuando el canal se cae, la librería reintenta
+ * el join sola con backoff y en la mayoría de los casos vuelve en segundos. Ese
+ * rato NO es "actualiza a mano" —no hay nada que la recepcionista tenga que
+ * hacer—, pero tampoco es "en línea": mientras dura, los mensajes que lleguen
+ * se pierden, porque Realtime no reenvía lo que pasó mientras estabas afuera.
+ * Por eso al volver se recarga el hilo abierto.
+ */
+export type RealtimeUiStatus = "waiting" | "connected" | "reconnecting" | "error";
+
+/**
+ * Cuánto se le da al reintento automático antes de dejar de decir
+ * "Reconectando…" y admitir que hay que refrescar. Sin este techo, un canal que
+ * rebota para siempre (por ejemplo por un problema de permisos) se vería igual
+ * que un bache de wifi de tres segundos, y la recepcionista se quedaría
+ * esperando una bandeja que no va a volver sola.
+ */
+const RECONNECTING_GRACE_MS = 20_000;
 
 export type UseInboxRealtimeOptions = {
   setConversations: SetConversations;
@@ -51,8 +69,14 @@ export type UseInboxRealtimeOptions = {
   onMissingContext?: () => void;
   /** Banner in-app único cuando hay alerta urgente (aunque falle Notification API). */
   onUrgentHandoffBanner?: () => void;
-  /** Chip: esperando / conectado / error. */
+  /** Chip: esperando / conectado / reconectando / error. */
   onRealtimeConnection?: (status: RealtimeUiStatus, detail?: string) => void;
+  /**
+   * El canal volvió después de haberse caído. Lo que pasó durante el corte NO
+   * llega solo —Realtime no tiene replay—, así que el consumidor tiene que
+   * recargar lo que esté mostrando.
+   */
+  onRealtimeRecovered?: () => void;
 };
 
 /** Reordena la lista por `lastActivityIso` descendente. */
@@ -169,6 +193,7 @@ export function useInboxRealtime({
   onMissingContext,
   onUrgentHandoffBanner,
   onRealtimeConnection,
+  onRealtimeRecovered,
 }: UseInboxRealtimeOptions) {
   const setConversationsRef = useRef(setConversations);
   const activeConversationIdRef = useRef(activeConversationId);
@@ -177,6 +202,7 @@ export function useInboxRealtime({
   const onMissingRef = useRef(onMissingContext);
   const onUrgentBannerRef = useRef(onUrgentHandoffBanner);
   const onConnRef = useRef(onRealtimeConnection);
+  const onRecoveredRef = useRef(onRealtimeRecovered);
 
   /** Último aviso urgente por clave de conversación / caso. */
   const urgentNotifiedAtRef = useRef<Map<string, number>>(new Map());
@@ -212,6 +238,10 @@ export function useInboxRealtime({
   }, [onRealtimeConnection]);
 
   useEffect(() => {
+    onRecoveredRef.current = onRealtimeRecovered;
+  }, [onRealtimeRecovered]);
+
+  useEffect(() => {
     if (typeof window === "undefined" || typeof Notification === "undefined") return;
     if (Notification.permission === "default") {
       void Notification.requestPermission().catch(() => {});
@@ -235,6 +265,14 @@ export function useInboxRealtime({
     let supabase: ReturnType<typeof createClient> | null = null;
     let channel: RealtimeChannel | null = null;
     let cancelled = false;
+    /**
+     * Ya estuvimos conectados alguna vez en esta sesión. Distingue "primer
+     * enganche" de "volvió después de caerse", que es lo único que obliga a
+     * recargar el hilo.
+     */
+    let wasConnected = false;
+    /** Cuenta atrás de `RECONNECTING_GRACE_MS`; `null` = no hay caída en curso. */
+    let graceTimer: ReturnType<typeof setTimeout> | null = null;
     const activeDesktopNotifications = activeDesktopNotificationsRef.current;
 
     try {
@@ -608,23 +646,53 @@ export function useInboxRealtime({
           handleWubbyPostgresChange as (payload: RealtimePostgresChangesPayload<Record<string, unknown>>) => void
         )
         .subscribe((status, err) => {
+          // Al desmontar, el `removeChannel` del cleanup dispara `CLOSED`. Sin
+          // esta guarda ese cierre normal pintaba el chip en rojo justo cuando
+          // la bandeja ya no está en pantalla.
+          if (cancelled) return;
+
           if (status === "SUBSCRIBED") {
+            if (graceTimer !== null) {
+              clearTimeout(graceTimer);
+              graceTimer = null;
+            }
             onConnRef.current?.("connected");
-          } else if (
-            status === "CHANNEL_ERROR" ||
-            status === "TIMED_OUT" ||
-            status === "CLOSED"
-          ) {
-            onConnRef.current?.("error", err?.message ?? String(status));
+            // Solo es "recuperación" si antes ya habíamos estado conectados y
+            // nos caímos. El primer SUBSCRIBED de la sesión no recarga nada:
+            // la bandeja acaba de cargar el hilo por su cuenta.
+            if (wasConnected) {
+              onRecoveredRef.current?.();
+            }
+            wasConnected = true;
+          } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+            // La librería reintenta el join sola con backoff. Mientras dure eso
+            // el estado honesto es "reconectando", no "actualiza a mano".
+            onConnRef.current?.("reconnecting", err?.message ?? String(status));
             if (err) {
               console.warn("[inbox realtime] error de suscripción", status, err);
             }
+            // Un solo temporizador por caída: si a los 20 s no volvió, el
+            // reintento automático no está funcionando y hay que decirlo.
+            if (graceTimer === null) {
+              graceTimer = setTimeout(() => {
+                graceTimer = null;
+                if (cancelled) return;
+                onConnRef.current?.("error", "la conexión no se restableció sola");
+              }, RECONNECTING_GRACE_MS);
+            }
+          } else if (status === "CLOSED") {
+            onConnRef.current?.("error", String(status));
           }
         });
     })();
 
     return () => {
       cancelled = true;
+
+      if (graceTimer !== null) {
+        clearTimeout(graceTimer);
+        graceTimer = null;
+      }
 
       for (const n of activeDesktopNotifications.values()) {
         try {

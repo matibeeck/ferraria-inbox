@@ -97,6 +97,26 @@ const LAZY_MEDIA_AUTO_LOAD_MS = 24 * 60 * 60 * 1000;
  */
 const DELIVERY_STATUS_REFETCH_MS = 6000;
 
+/**
+ * Red de seguridad de la burbuja optimista. Si a los 8 s sigue en "Enviando…",
+ * la respuesta HTTP del envío se perdió y le preguntamos al servidor por
+ * `client_temp_id` si la fila existe.
+ *
+ * El envío normal responde muy por debajo de esto, así que en el camino feliz
+ * este temporizador se cancela sin llegar a disparar nunca.
+ */
+const SEND_SAFETY_NET_MS = 8000;
+
+/**
+ * Cuántas veces se reintenta la consulta de reconciliación antes de rendirse.
+ *
+ * Rendirse significa dejar la burbuja en "Enviando…", NO marcarla como fallida:
+ * si no podemos ni preguntar es porque no hay red, y decirle "No se envió" a la
+ * recepcionista sin saberlo la empuja a reenviar y a duplicarle el mensaje al
+ * huésped. El reloj es incómodo; el mensaje duplicado lo ve el huésped.
+ */
+const SEND_SAFETY_NET_MAX_ATTEMPTS = 5;
+
 const COMPOSER_MIN_HEIGHT_PX = 38;
 const COMPOSER_MAX_HEIGHT_PX = 104;
 /**
@@ -1851,6 +1871,7 @@ function MessageBubble({
   guestSeed,
   reaction,
   deliveryReceipt,
+  onRetry,
   staff = false,
   firstOfGroup = true,
   lastOfGroup = true,
@@ -1878,6 +1899,11 @@ function MessageBubble({
    * envían por n8n nunca lo traen, y esos se quedan en ✓.
    */
   deliveryReceipt?: MessageDeliveryReceipt;
+  /**
+   * Reintentar el envío de ESTA burbuja. Solo llega en las salientes de texto
+   * que quedaron en "No se envió"; el botón no se pinta si no hay handler.
+   */
+  onRetry?: (m: Message) => void;
 }) {
   const isUser = m.sender === "user";
   const isAi = m.sender === "ai";
@@ -2006,6 +2032,12 @@ function MessageBubble({
   // ✓ ("salió"), nunca en ✓✓. Ver `resolveDeliveryTick`.
   const deliveryTick = resolveDeliveryTick(deliveryStatus, deliveryReceipt);
   const failedReceipt = deliveryTick === "failed" ? deliveryReceipt : undefined;
+  /**
+   * Falló y lo sabemos por nosotros mismos, no por Meta: el mensaje nunca llegó
+   * a guardarse. Es el único caso que ofrece reintentar, porque es el único en
+   * el que reintentar no puede duplicarle nada al huésped.
+   */
+  const localSendFailed = deliveryTick === "failed" && !deliveryReceipt;
   // Motivo legible del fallo; `null` si Meta no mandó código conocido ni título.
   // Se calcula acá para que el chip y la línea de abajo no puedan contradecirse.
   const deliveryFailureReason = failedReceipt
@@ -2285,8 +2317,41 @@ function MessageBubble({
                     <IconCircleX className="h-3 w-3 shrink-0" aria-hidden />
                     <span>No entregado</span>
                   </span>
+                ) : localSendFailed ? (
+                  /*
+                    Distinto de "No entregado": ahí Meta recibió el mensaje y lo
+                    rechazó después. Acá no salió nunca, así que sí se puede
+                    reintentar — y el reintento reusa el mismo `client_temp_id`,
+                    que es lo que impide mandarlo dos veces.
+
+                    El botón va visible dentro de la burbuja, no en un tooltip:
+                    recepción trabaja de afán y desde tablet.
+                  */
+                  <span className="inline-flex items-center gap-1.5">
+                    <span
+                      className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-semibold leading-tight"
+                      style={{
+                        background: onRed ? "rgba(255,255,255,.18)" : "var(--red-soft)",
+                        border: onRed ? "1px solid rgba(255,255,255,.3)" : "1px solid var(--accent)",
+                        color: onRed ? "#fff" : "var(--accent)",
+                      }}
+                    >
+                      <IconCircleX className="h-3 w-3 shrink-0" aria-hidden />
+                      <span>No se envió</span>
+                    </span>
+                    {onRetry && (
+                      <button
+                        type="button"
+                        onClick={() => onRetry(m)}
+                        className="rounded-md px-1.5 py-0.5 text-[10px] font-semibold leading-tight underline underline-offset-2"
+                        style={{ color: onRed ? "#fff" : "var(--accent)" }}
+                      >
+                        Reintentar
+                      </button>
+                    )}
+                  </span>
                 ) : deliveryTick === "pending" ? (
-                  <IconClock className="h-3 w-3 shrink-0" style={{ color: metaColor }} aria-label="Enviando" />
+                  <IconClock className="h-3 w-3 shrink-0" style={{ color: metaColor }} aria-label="Enviando…" />
                 ) : deliveryTick === "sent" ? (
                   <IconCheck className="h-3.5 w-3.5 shrink-0" style={{ color: metaColor }} aria-label="Enviado" />
                 ) : (
@@ -2387,6 +2452,7 @@ export default function InboxApp() {
     urgentHandoffBannerVisible,
     dismissUrgentHandoffBanner,
     realtimeUiStatus,
+    realtimeRecoveryToken,
     availableHotels,
     activeHotelId: resolvedActiveHotelId,
     engineEnabled,
@@ -2504,7 +2570,10 @@ export default function InboxApp() {
   const { messagesError } = useInboxConversationMessages(
     selectedId,
     conversationHotelId,
-    setConversations
+    setConversations,
+    // Realtime volvió después de un corte: se recarga el hilo abierto porque lo
+    // que pasó mientras estaba caído no llega solo.
+    realtimeRecoveryToken
   );
 
   /**
@@ -3285,6 +3354,313 @@ export default function InboxApp() {
     };
   }, [selectedId]);
 
+  /**
+   * Todo lo que hace falta para reenviar un mensaje de texto sin depender de lo
+   * que haya en pantalla. Vive en un ref y no en estado porque nadie lo pinta:
+   * lo leen la red de seguridad y el botón "Reintentar", que pueden dispararse
+   * mucho después de que la asesora cambió de chat o de idioma en el selector.
+   *
+   * Se guarda por `clientTempId`, el mismo que viaja al engine y que termina en
+   * `Wubby_Whatsapp.client_temp_id`. Ese id es lo que hace que reintentar sea
+   * seguro: el servidor lo usa para no mandar dos veces el mismo mensaje.
+   */
+  type PendingTextSend = {
+    conversationId: string;
+    guestIdentity: string;
+    text: string;
+    /** Idioma congelado en el momento del envío, no el del selector de ahora. */
+    targetLang: string;
+    hotelId: string | null;
+  };
+  const pendingSendsRef = useRef<Map<string, PendingTextSend>>(new Map());
+  const sendTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const sendAttemptsRef = useRef<Map<string, number>>(new Map());
+
+  const clearSendSafetyNet = useCallback((clientTempId: string) => {
+    const timer = sendTimersRef.current.get(clientTempId);
+    if (timer) clearTimeout(timer);
+    sendTimersRef.current.delete(clientTempId);
+    sendAttemptsRef.current.delete(clientTempId);
+  }, []);
+
+  /**
+   * La burbuja salió: se apaga el reloj y se le pegan el id real y el `wamid`.
+   *
+   * El `wamid` es lo que después la cruza con los acuses de Meta. Antes solo lo
+   * traía el eco de Realtime, y por eso una burbuja podía quedarse en "Enviando…"
+   * para siempre si ese evento se perdía.
+   */
+  const markSendConfirmed = useCallback(
+    (
+      conversationId: string,
+      clientTempId: string,
+      info: { messageId?: string | null; wamid?: string | null }
+    ) => {
+      clearSendSafetyNet(clientTempId);
+      pendingSendsRef.current.delete(clientTempId);
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id === conversationId
+            ? {
+                ...c,
+                messages: c.messages.map((m) =>
+                  m.clientTempId === clientTempId
+                    ? {
+                        ...m,
+                        status: "confirmed" as const,
+                        ...(info.messageId ? { id: info.messageId } : {}),
+                        ...(info.wamid ? { wamid: info.wamid } : {}),
+                      }
+                    : m
+                ),
+              }
+            : c
+        )
+      );
+    },
+    [clearSendSafetyNet, setConversations]
+  );
+
+  /**
+   * El mensaje NO salió y lo sabemos con certeza. La burbuja queda con
+   * "No se envió" y el botón para reintentar.
+   *
+   * El contexto del envío se conserva a propósito: es lo que necesita el botón
+   * para reenviar con el MISMO `clientTempId`.
+   */
+  const markSendFailed = useCallback(
+    (conversationId: string, clientTempId: string) => {
+      clearSendSafetyNet(clientTempId);
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id === conversationId
+            ? {
+                ...c,
+                messages: c.messages.map((m) =>
+                  m.clientTempId === clientTempId
+                    ? { ...m, status: "failed" as const }
+                    : m
+                ),
+              }
+            : c
+        )
+      );
+    },
+    [clearSendSafetyNet, setConversations]
+  );
+
+  /**
+   * Le pregunta al servidor si la fila ya existe para este `clientTempId`.
+   *
+   * Devuelve `true` si quedó resuelto (enviado o fallido) y `false` si seguimos
+   * sin saber — típicamente porque no hay red. En ese caso el llamador NO debe
+   * inventar un desenlace.
+   */
+  const reconcilePendingSend = useCallback(
+    async (clientTempId: string): Promise<boolean> => {
+      const ctx = pendingSendsRef.current.get(clientTempId);
+      // Sin contexto ya se resolvió por otro camino (el eco de Realtime suele
+      // ganarle a la red de seguridad).
+      if (!ctx) return true;
+      try {
+        const params = new URLSearchParams({
+          conversationId: ctx.conversationId,
+          clientTempId,
+          ...(ctx.hotelId ? { hotelId: ctx.hotelId } : {}),
+        });
+        const res = await fetch(`/api/inbox/message-by-temp-id?${params}`, {
+          cache: "no-store",
+        });
+        const j = (await res.json().catch(() => ({}))) as {
+          found?: boolean;
+          messageId?: string;
+          whatsappMessageId?: string | null;
+        };
+        if (!res.ok) return false;
+        if (j.found) {
+          markSendConfirmed(ctx.conversationId, clientTempId, {
+            messageId: j.messageId,
+            wamid: j.whatsappMessageId ?? null,
+          });
+        } else {
+          markSendFailed(ctx.conversationId, clientTempId);
+        }
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [markSendConfirmed, markSendFailed]
+  );
+
+  const armSendSafetyNet = useCallback(
+    (clientTempId: string) => {
+      const timer = sendTimersRef.current.get(clientTempId);
+      if (timer) clearTimeout(timer);
+      const next = setTimeout(() => {
+        sendTimersRef.current.delete(clientTempId);
+        void (async () => {
+          const resolved = await reconcilePendingSend(clientTempId);
+          if (resolved) return;
+          // No pudimos ni preguntar. Se reintenta un rato y, si nunca hay
+          // respuesta, la burbuja se queda en "Enviando…": es la verdad.
+          const attempts = (sendAttemptsRef.current.get(clientTempId) ?? 0) + 1;
+          sendAttemptsRef.current.set(clientTempId, attempts);
+          if (attempts < SEND_SAFETY_NET_MAX_ATTEMPTS) {
+            armSendSafetyNet(clientTempId);
+          }
+        })();
+      }, SEND_SAFETY_NET_MS);
+      sendTimersRef.current.set(clientTempId, next);
+    },
+    [reconcilePendingSend]
+  );
+
+  // Al desmontar la bandeja no puede quedar ningún temporizador vivo apuntando a
+  // burbujas que ya no existen.
+  useEffect(() => {
+    const timers = sendTimersRef.current;
+    return () => {
+      for (const timer of timers.values()) clearTimeout(timer);
+      timers.clear();
+    };
+  }, []);
+
+  /**
+   * Realtime volvió después de un corte: toda burbuja que siga sin resolverse
+   * vuelve a preguntar por su `client_temp_id`.
+   *
+   * Es el rescate de las que agotaron los 5 intentos de verificación mientras no
+   * había red y se quedaron en "Enviando…". Sin esto la única salida seguía
+   * siendo refrescar, que es justo el bug que esta tanda cierra. El contador de
+   * intentos se reinicia: volvió la conexión, merecen intentos nuevos.
+   *
+   * También repasa las que ya están en "No se envió": si la fila aparece tarde,
+   * la burbuja se corrige sola a "Enviado" en vez de invitar a un reenvío que le
+   * duplicaría el mensaje al huésped.
+   */
+  useEffect(() => {
+    if (!realtimeRecoveryToken) return;
+    const unresolved = [...pendingSendsRef.current.keys()];
+    if (unresolved.length === 0) return;
+    for (const clientTempId of unresolved) {
+      sendAttemptsRef.current.delete(clientTempId);
+      void (async () => {
+        const resolved = await reconcilePendingSend(clientTempId);
+        if (!resolved) armSendSafetyNet(clientTempId);
+      })();
+    }
+  }, [realtimeRecoveryToken, reconcilePendingSend, armSendSafetyNet]);
+
+  /**
+   * Manda el POST del texto humano. Lo comparten el envío normal y el botón
+   * "Reintentar", que usa el MISMO `clientTempId` justamente para que el candado
+   * del servidor pueda reconocerlo y no reenviar nada.
+   */
+  const postHumanText = useCallback(
+    async (clientTempId: string, ctx: PendingTextSend, isRetry = false) => {
+      const res = await fetch("/api/send-human-message", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          guestPhone: ctx.guestIdentity,
+          message: ctx.text,
+          conversationId: ctx.conversationId,
+          hotelId: ctx.hotelId,
+          clientTempId,
+          // Le sube el listón al candado del servidor: en un reintento, "no
+          // pude verificar" se trata como "no reenviar".
+          ...(isRetry ? { isRetry: true } : {}),
+          ...(ctx.targetLang !== DEFAULT_COMPOSER_LANGUAGE
+            ? { targetLang: ctx.targetLang }
+            : {}),
+        }),
+      });
+      const j = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        skipped?: boolean;
+        code?: string;
+        notSent?: boolean;
+        alreadySent?: boolean;
+        messageId?: string;
+        whatsappMessageId?: string | null;
+      };
+      return { res, j };
+    },
+    []
+  );
+
+  /**
+   * Reintento manual desde la burbuja. No puede duplicarle el mensaje al
+   * huésped: reusa el `clientTempId` y el servidor, antes de tocar el engine,
+   * comprueba si esa fila ya existe.
+   */
+  const retrySend = useCallback(
+    async (message: Message) => {
+      const clientTempId = message.clientTempId;
+      if (!clientTempId) return;
+      const ctx = pendingSendsRef.current.get(clientTempId);
+      if (!ctx) return;
+
+      setSendWarning(null);
+      // Vuelve a "Enviando…". Eso solo ya frena el doble clic: el botón
+      // "Reintentar" solo existe mientras la burbuja está en "No se envió".
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id === ctx.conversationId
+            ? {
+                ...c,
+                messages: c.messages.map((m) =>
+                  m.clientTempId === clientTempId
+                    ? { ...m, status: "pending" as const }
+                    : m
+                ),
+              }
+            : c
+        )
+      );
+      armSendSafetyNet(clientTempId);
+
+      try {
+        const { res, j } = await postHumanText(clientTempId, ctx, true);
+        if (res.ok) {
+          markSendConfirmed(ctx.conversationId, clientTempId, {
+            messageId: j.messageId,
+            wamid: j.whatsappMessageId ?? null,
+          });
+          scheduleDeliveryReceiptsRefetch();
+          return;
+        }
+        if (j.notSent) {
+          markSendFailed(ctx.conversationId, clientTempId);
+          setSendWarning(j.error ?? "El mensaje no se envió. Reintenta o mándalo en español.");
+          return;
+        }
+        // Error sin garantía: preguntamos antes de afirmar nada.
+        setSendWarning(j.error ?? "No se pudo enviar el mensaje.");
+        const resolved = await reconcilePendingSend(clientTempId);
+        if (!resolved) markSendFailed(ctx.conversationId, clientTempId);
+      } catch {
+        setSendWarning("Error de red al enviar el mensaje.");
+        // El reintento no vuelve a quedar en "Enviando…" indefinidamente: la
+        // asesora ya está mirando esta burbuja y necesita poder volver a
+        // intentarlo. El candado del servidor sigue siendo el que impide el
+        // duplicado.
+        const resolved = await reconcilePendingSend(clientTempId);
+        if (!resolved) markSendFailed(ctx.conversationId, clientTempId);
+      }
+    },
+    [
+      armSendSafetyNet,
+      markSendConfirmed,
+      markSendFailed,
+      postHumanText,
+      reconcilePendingSend,
+      scheduleDeliveryReceiptsRefetch,
+      setConversations,
+    ]
+  );
+
   const sendMessage = async () => {
     const text = draft.trim();
     if ((!text && !selectedFile) || !selectedId || sendingMedia) return;
@@ -3490,6 +3866,18 @@ export default function InboxApp() {
      */
     const outgoingLang = composerLang;
 
+    // Contexto del envío, para la red de seguridad y el botón "Reintentar".
+    // Se guarda ANTES del POST: si la respuesta se pierde, esto es lo único que
+    // permite averiguar después si el mensaje salió o no.
+    pendingSendsRef.current.set(clientTempId, {
+      conversationId: selectedConv!.id,
+      guestIdentity: resolveEngineGuestIdentity(selectedConv!),
+      text,
+      targetLang: outgoingLang,
+      hotelId: activeHotelId,
+    });
+    armSendSafetyNet(clientTempId);
+
     /**
      * Deshace el optimista cuando el engine garantiza que el mensaje NO salió
      * (falla la traducción, que ocurre ANTES de mandarlo a Meta). Le devuelve el
@@ -3497,6 +3885,11 @@ export default function InboxApp() {
      * reenvía solo.
      */
     const rollbackUnsentMessage = () => {
+      // El mensaje no salió Y la burbuja se retira: no hay nada que reintentar
+      // desde el hilo, el texto vuelve al composer. Se sueltan temporizador y
+      // contexto para que la red de seguridad no persiga un fantasma.
+      clearSendSafetyNet(clientTempId);
+      pendingSendsRef.current.delete(clientTempId);
       setConversations((prev) =>
         prev.map((c) =>
           c.id === selectedId
@@ -3522,29 +3915,9 @@ export default function InboxApp() {
     };
 
     try {
-      const res = await fetch("/api/send-human-message", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          // LID-aware y canal-aware: un identificador de Meta viaja crudo, un
-          // teléfono en dígitos, y el UUID del hilo de una OTA sin tocar, que es
-          // con lo que el engine encuentra la conversación para responder por
-          // Channex.
-          guestPhone: resolveEngineGuestIdentity(selectedConv!),
-          message: text,
-          conversationId: selectedConv!.id,
-          hotelId: activeHotelId,
-          clientTempId,
-          // Con español no viaja el campo: cero cambio de comportamiento.
-          ...(outgoingLang !== DEFAULT_COMPOSER_LANGUAGE ? { targetLang: outgoingLang } : {}),
-        }),
-      });
-      const j = (await res.json().catch(() => ({}))) as {
-        error?: string;
-        skipped?: boolean;
-        code?: string;
-        notSent?: boolean;
-      };
+      // Mismo POST que usa el botón "Reintentar". El contexto (identidad del
+      // huésped LID-aware, idioma congelado, hotel) ya quedó guardado arriba.
+      const { res, j } = await postHumanText(clientTempId, pendingSendsRef.current.get(clientTempId)!);
       if (!res.ok) {
         if (j.notSent) {
           // El engine falló ANTES de enviar: la burbuja se retira y el texto
@@ -3583,13 +3956,30 @@ export default function InboxApp() {
         } else {
           setSendWarning(j.error ?? "No se pudo notificar al engine");
         }
+        // Error SIN garantía de que no haya salido. No afirmamos nada: le
+        // preguntamos al servidor por `client_temp_id` y recién con el dato la
+        // burbuja queda en "Enviado" o en "No se envió".
+        const resolved = await reconcilePendingSend(clientTempId);
+        if (!resolved) armSendSafetyNet(clientTempId);
+        return;
       }
+
+      // Camino feliz: la respuesta del envío apaga el reloj. Antes esto dependía
+      // del eco de Realtime, que no tiene acuse ni reintento, y por eso un bache
+      // de red dejaba la burbuja en "Enviando…" hasta refrescar.
+      markSendConfirmed(selectedConv!.id, clientTempId, {
+        messageId: j.messageId,
+        wamid: j.whatsappMessageId ?? null,
+      });
       // Meta puede aceptar el mensaje y rechazarlo después (131026 "Message
       // Undeliverable"): la burbuja queda en ✓ y solo el acuse posterior la
       // mueve a ✓✓ o la marca como no entregada.
       scheduleDeliveryReceiptsRefetch();
     } catch {
       setSendWarning("Error de red al enviar al engine");
+      // Igual que arriba: puede haber salido antes de que se cayera la red.
+      const resolved = await reconcilePendingSend(clientTempId);
+      if (!resolved) armSendSafetyNet(clientTempId);
     }
     // Sin refetch. Este endpoint NO escribe en la base: reenvía a
     // ferraria-engine, que es quien inserta el mensaje y mueve `conversations`,
@@ -5176,6 +5566,7 @@ export default function InboxApp() {
                               firstOfGroup={firstOfGroup}
                               lastOfGroup={lastOfGroup}
                               reaction={reactionByMessageId.get(m.id)}
+                              onRetry={retrySend}
                               deliveryReceipt={
                                 m.wamid ? deliveryReceipts.get(m.wamid) : undefined
                               }

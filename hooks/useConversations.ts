@@ -107,6 +107,12 @@ export function useConversations(options?: UseConversationsOptions) {
   const [urgentHandoffBannerVisible, setUrgentHandoffBannerVisible] = useState(false);
   const [realtimeUiStatus, setRealtimeUiStatus] = useState<RealtimeUiStatus>("waiting");
   const [realtimeErrorDetail, setRealtimeErrorDetail] = useState<string | undefined>(undefined);
+  /**
+   * Sube de uno cada vez que el canal vuelve después de haberse caído. Es la
+   * señal con la que la bandeja recarga el hilo abierto: durante el corte los
+   * mensajes nuevos no llegaron, y Realtime no los reenvía al reconectar.
+   */
+  const [realtimeRecoveryToken, setRealtimeRecoveryToken] = useState(0);
 
   const dismissUrgentHandoffBanner = useCallback(() => {
     setUrgentHandoffBannerVisible(false);
@@ -115,6 +121,13 @@ export function useConversations(options?: UseConversationsOptions) {
   const onRealtimeConnection = useCallback((status: RealtimeUiStatus, detail?: string) => {
     setRealtimeUiStatus(status);
     setRealtimeErrorDetail(status === "error" ? detail : undefined);
+  }, []);
+
+  const onRealtimeRecovered = useCallback(() => {
+    // La lista se recarga acá; el hilo abierto lo recarga la bandeja leyendo el
+    // token, porque este hook no sabe cuál está en pantalla.
+    void loadRef.current({ silent: true });
+    setRealtimeRecoveryToken((prev) => prev + 1);
   }, []);
 
   // Ref siempre-actualizado de la conversación activa. Permite que `load` lea el
@@ -325,6 +338,7 @@ export function useConversations(options?: UseConversationsOptions) {
       setUrgentHandoffBannerVisible(true);
     },
     onRealtimeConnection,
+    onRealtimeRecovered,
   });
 
   return {
@@ -339,6 +353,7 @@ export function useConversations(options?: UseConversationsOptions) {
     dismissUrgentHandoffBanner,
     realtimeUiStatus,
     realtimeErrorDetail,
+    realtimeRecoveryToken,
     availableHotels,
     activeHotelId: resolvedActiveHotelId,
     engineEnabled,

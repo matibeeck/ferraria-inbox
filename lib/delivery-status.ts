@@ -1,4 +1,8 @@
-import type { MessageDeliveryReceipt, MetaDeliveryStatus } from "@/lib/inbox-types";
+import type {
+  MessageDeliveryReceipt,
+  MessageDeliveryStatus,
+  MetaDeliveryStatus,
+} from "@/lib/inbox-types";
 
 /**
  * Orden de avance de los acuses de Meta. Sirve para dos cosas: quedarse con el
@@ -63,12 +67,18 @@ export type DeliveryTick = "pending" | "sent" | "delivered" | "read" | "failed";
  * sobre por qué "sin acuse" es el caso normal y no una anomalía.
  */
 export function resolveDeliveryTick(
-  localStatus: "pending" | "confirmed",
+  localStatus: MessageDeliveryStatus,
   receipt: MessageDeliveryReceipt | undefined
 ): DeliveryTick {
   // El acuse de Meta gana sobre el estado local: el optimista solo sabe si la
-  // petición terminó, y Meta sabe si el huésped lo tiene.
+  // petición terminó, y Meta sabe si el huésped lo tiene. Gana incluso sobre un
+  // `failed` local: si Meta acusó algo, hay `wamid`, y si hay `wamid` el mensaje
+  // salió — el fallo local estaría desactualizado.
   if (receipt) return receipt.status;
+  // Sin acuse, un fallo local SÍ manda. Es el caso de "preguntamos por
+  // `client_temp_id` y la fila no existe": el mensaje no salió y hay que
+  // ofrecer reintentar, no dejar la burbuja en ✓ como si hubiera salido.
+  if (localStatus === "failed") return "failed";
   if (localStatus === "pending") return "pending";
   return "sent";
 }

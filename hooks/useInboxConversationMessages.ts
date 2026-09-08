@@ -21,7 +21,14 @@ type MessagesResponse = {
 export function useInboxConversationMessages(
   conversationId: string,
   hotelId: string | null,
-  setConversations: Dispatch<SetStateAction<Conversation[]>>
+  setConversations: Dispatch<SetStateAction<Conversation[]>>,
+  /**
+   * Cambiarlo fuerza a recargar el hilo aunque siga siendo la misma
+   * conversación. Lo usa la recuperación de Realtime: mientras el canal estuvo
+   * caído no llegó nada, y sin esto el hilo abierto se queda con un hueco hasta
+   * que la recepcionista cambie de chat o refresque.
+   */
+  reloadToken: number = 0
 ) {
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [messagesError, setMessagesError] = useState<string | null>(null);
@@ -61,7 +68,34 @@ export function useInboxConversationMessages(
 
         const messages = json.messages ?? [];
         setConversations((prev) =>
-          prev.map((c) => (c.id === convId ? { ...c, messages, messagesLoaded: true } : c))
+          prev.map((c) => {
+            if (c.id !== convId) return c;
+            /*
+              El historial de la base es autoritativo para todo lo que YA está
+              guardado, pero por definición no contiene las burbujas que todavía
+              no salieron: las que están "Enviando…" y las que quedaron en
+              "No se envió".
+
+              Antes se pisaba el hilo entero y esas burbujas desaparecían sin
+              dejar rastro — la recepcionista se quedaba creyendo que había
+              enviado algo que nunca salió. Se conservan por `clientTempId`, y
+              solo mientras el servidor no las traiga ya guardadas.
+            */
+            const serverTempIds = new Set(
+              messages.map((m) => m.clientTempId).filter(Boolean)
+            );
+            const localUnsaved = c.messages.filter(
+              (m) =>
+                (m.status === "pending" || m.status === "failed") &&
+                m.clientTempId &&
+                !serverTempIds.has(m.clientTempId)
+            );
+            return {
+              ...c,
+              messages: localUnsaved.length ? [...messages, ...localUnsaved] : messages,
+              messagesLoaded: true,
+            };
+          })
         );
       } catch (e) {
         // Abortado (cambió la conversación, el hotel, o desmontó): la petición
@@ -82,7 +116,7 @@ export function useInboxConversationMessages(
     return () => {
       controller.abort();
     };
-  }, [conversationId, hotelId, setConversations]);
+  }, [conversationId, hotelId, setConversations, reloadToken]);
 
   return { loadingMessages, messagesError };
 }

@@ -167,3 +167,75 @@ export async function attachWamidToLatestOutbound(params: {
     console.error("[outbound-wamid] update de fila saliente excepción", e);
   }
 }
+
+/**
+ * Resultado del candado de idempotencia.
+ *
+ * Los tres casos son distintos y NO se pueden colapsar en "existe / no existe":
+ * `unknown` (no pudimos preguntar) es lo que impide reenviar a ciegas un
+ * mensaje que quizá ya salió. Ver el candado en `send-human-message`.
+ */
+export type OutboundLookupResult =
+  | {
+      status: "found";
+      /** `Wubby_Whatsapp.id` como string, igual que lo usa `Message.id`. */
+      messageId: string;
+      wamid: string | null;
+    }
+  | { status: "absent" }
+  | { status: "unknown" };
+
+/**
+ * ¿Ya existe una fila saliente para este `client_temp_id` en este hotel?
+ *
+ * Es la pieza sobre la que se apoyan las dos defensas contra el mensaje
+ * duplicado: el candado de `POST /api/send-human-message` (no reenviar lo que
+ * ya salió) y la red de seguridad de la bandeja (decidir si una burbuja pegada
+ * en "Enviando…" de verdad falló o solo se perdió la respuesta HTTP).
+ *
+ * `hotel_id` va PRIMERO en el filtro a propósito: es el orden de
+ * `idx_wubby_hotel_client_temp_id (hotel_id, client_temp_id)`. Al revés, esto
+ * sería un barrido de tabla en el camino caliente del envío.
+ *
+ * NADA de `.maybeSingle()`: `client_temp_id` **no tiene unicidad en DB** (hay
+ * duplicados en producción, por eso el índice no es UNIQUE) y `maybeSingle`
+ * lanza con más de una fila. Se ordena por `id` y se toma la primera, que es la
+ * que de verdad se envió; una eventual gemela posterior no cambia la respuesta.
+ *
+ * No lanza nunca: ante un error de base devuelve `unknown`, que es distinto de
+ * `absent`. Confundirlos es exactamente lo que duplica mensajes.
+ */
+export async function findOutboundByClientTempId(params: {
+  clientTempId: string;
+  hotelId: string;
+}): Promise<OutboundLookupResult> {
+  const { clientTempId, hotelId } = params;
+  if (!clientTempId || !hotelId) return { status: "unknown" };
+
+  try {
+    const { data, error } = await getSupabaseServerClient()
+      .from(WUBBY_TABLE)
+      .select("id, wamid")
+      .eq("hotel_id", hotelId)
+      .eq("client_temp_id", clientTempId)
+      .order("id", { ascending: true })
+      .limit(1);
+
+    if (error) {
+      console.error("[outbound-wamid] lookup por client_temp_id falló", error.message);
+      return { status: "unknown" };
+    }
+
+    const row = data?.[0];
+    if (!row) return { status: "absent" };
+
+    return {
+      status: "found",
+      messageId: String(row.id),
+      wamid: typeof row.wamid === "string" && row.wamid.trim() ? row.wamid.trim() : null,
+    };
+  } catch (e) {
+    console.error("[outbound-wamid] lookup por client_temp_id excepción", e);
+    return { status: "unknown" };
+  }
+}

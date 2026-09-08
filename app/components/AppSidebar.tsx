@@ -452,7 +452,13 @@ export function AppSidebar({
     ? { label: "Sin red", dot: "#fff", background: "rgba(255,255,255,.18)", color: "#fff" }
     : realtimeStatus === "error"
       ? { label: "Actualiza a mano", dot: "var(--sidebar)", background: "#fff", color: "var(--sidebar)" }
-      : realtimeStatus === "waiting"
+      : // Hay internet: lo que se cayó es la actualización en vivo, y está
+        // volviendo sola. No es "actualiza a mano" —no hay nada que hacer más
+        // que esperar unos segundos— y tampoco es "en línea", porque mientras
+        // dure no entran mensajes. Si no vuelve, escala a error por su cuenta.
+        realtimeStatus === "reconnecting"
+        ? { label: "Reconectando…", dot: "#ffe08a", background: "rgba(255,255,255,.18)", color: "#fff" }
+        : realtimeStatus === "waiting"
         ? { label: "Conectando", dot: "#ffe08a", background: "rgba(255,255,255,.18)", color: "#fff" }
         : {
             label: "En línea",
