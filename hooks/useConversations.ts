@@ -7,6 +7,7 @@ import {
   type HotelWhatsappByIdMap,
 } from "@/lib/hotel-whatsapp-map";
 import { getConversationDisplayActivityMs } from "@/lib/chat-utils";
+import { applyTicketBadges, type InboxTicketBadge } from "@/lib/inbox-ticket-badges";
 import { writeStoredActiveHotelId } from "@/lib/active-hotel-storage";
 import { type RealtimeUiStatus, useInboxRealtime } from "@/hooks/useInboxRealtime";
 
@@ -73,6 +74,25 @@ const MISSING_CONTEXT_DEBOUNCE_MS = 800;
  * suspensiones duran minutos, muy por encima de esta ventana.
  */
 const VISIBILITY_REFETCH_MIN_AGE_MS = 30_000;
+
+/**
+ * Cada cuánto se vuelven a pedir los badges de solicitud.
+ *
+ * Es polling y es a propósito: `service_tickets` no viaja por Realtime, y quien
+ * resuelve una solicitud suele ser el personal operativo desde OTRA tablet. Sin
+ * esto, la bandeja de recepción mostraría "Housekeeping · Hab 302" durante todo
+ * el turno sobre algo que ya se atendió.
+ *
+ * No recarga la bandeja: pega contra un endpoint que solo devuelve el mapa de
+ * badges (unos pocos kB contra los ~570 kB de `/api/inbox` en el hotel más
+ * grande). Y no corre con la pestaña en segundo plano.
+ */
+const TICKET_BADGES_REFRESH_MS = 60_000;
+
+type TicketBadgesResponse = {
+  ticketBadges?: Record<string, InboxTicketBadge>;
+  activeHotelId?: string | null;
+};
 
 export type { AvailableHotel };
 
@@ -314,6 +334,58 @@ export function useConversations(options?: UseConversationsOptions) {
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, []);
+
+  /**
+   * Refresco de los badges de solicitud. Ver `TICKET_BADGES_REFRESH_MS`.
+   *
+   * Best-effort de punta a punta: cualquier fallo se ignora en silencio y la
+   * bandeja se queda con los badges que ya tiene. Este refresco NUNCA puede
+   * vaciar la lista ni mostrar un error — lo único que hay en juego es que un
+   * distintivo informativo tarde un minuto más en apagarse.
+   */
+  useEffect(() => {
+    const hotelId = resolvedActiveHotelId;
+    if (!hotelId) return;
+
+    const controller = new AbortController();
+
+    const refresh = async () => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      try {
+        const res = await fetch(
+          `/api/inbox/ticket-badges?hotelId=${encodeURIComponent(hotelId)}`,
+          { cache: "no-store", signal: controller.signal }
+        );
+        if (!res.ok) return;
+        const json = (await res.json()) as TicketBadgesResponse;
+        // Respuesta de otro hotel (cambio de hotel mientras estaba en vuelo):
+        // se descarta en vez de pegar badges ajenos sobre la bandeja actual.
+        if ((json.activeHotelId ?? null) !== hotelId) return;
+        const badges = json.ticketBadges ?? {};
+        setConversations((prev) => applyTicketBadges(prev, badges));
+      } catch {
+        /* refresco informativo: si falla, se reintenta al minuto siguiente */
+      }
+    };
+
+    const timer = window.setInterval(() => {
+      void refresh();
+    }, TICKET_BADGES_REFRESH_MS);
+
+    // Al volver de segundo plano se pide de una, sin esperar el minuto: es
+    // justo cuando más desactualizado está el badge.
+    const onVisible = () => {
+      if (typeof document === "undefined" || document.hidden) return;
+      void refresh();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+
+    return () => {
+      controller.abort();
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [resolvedActiveHotelId]);
 
   useEffect(() => {
     if (!urgentHandoffBannerVisible) return;

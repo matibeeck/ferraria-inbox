@@ -22,6 +22,7 @@ import { requireSessionUser } from "@/lib/auth/require-user";
 import { requireCapability } from "@/lib/auth/require-capability";
 import { assertConversationInHotel } from "@/lib/auth/require-hotel";
 import { STAFF_CONTACTS_TABLE, normalizeStaffPhone } from "@/lib/staff-contacts";
+import { fetchTicketBadges, markTicketBadges } from "@/lib/inbox-ticket-badges-server";
 import type { Conversation } from "@/lib/inbox-types";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
 import { MESSAGES_LIMIT, POSTGREST_PAGE_SIZE } from "@/lib/message-limits";
@@ -328,7 +329,7 @@ export async function GET(request: Request) {
         });
       }
 
-      const [rpcResult, hotelTotalResult, staffPhones] = await Promise.all([
+      const [rpcResult, hotelTotalResult, staffPhones, ticketBadges] = await Promise.all([
         supabase.rpc(SEARCH_CONVERSATIONS_RPC, {
           p_hotel_id: activeHotelId,
           p_q: searchTerm,
@@ -343,6 +344,9 @@ export async function GET(request: Request) {
         // El badge de staff también en resultados de búsqueda: si no, la misma
         // conversación se vería marcada en la bandeja y sin marcar al buscarla.
         fetchActiveStaffPhones(supabase, activeHotelId),
+        // Mismo argumento para el badge de solicitud: buscar a un huésped no
+        // puede esconder que tiene algo pendiente sin atender.
+        fetchTicketBadges(supabase, activeHotelId),
       ]);
 
       if (rpcResult.error) {
@@ -386,6 +390,7 @@ export async function GET(request: Request) {
       const { convRows, lastMessageByConversationId } = splitEmbeddedRows(searchRows);
       const conversations = buildInboxConversations(convRows, lastMessageByConversationId);
       markStaffConversations(conversations, staffPhones);
+      markTicketBadges(conversations, ticketBadges);
       conversations.sort((a, b) => {
         return getConversationDisplayActivityMs(b) - getConversationDisplayActivityMs(a);
       });
@@ -411,7 +416,7 @@ export async function GET(request: Request) {
 
     // Independientes entre sí: ninguna necesita el resultado de otra, así que
     // van en paralelo y el GET cuesta un round trip, no tres.
-    const [recentResult, protectedResult, totalResult, staffPhones] = await Promise.all([
+    const [recentResult, protectedResult, totalResult, staffPhones, ticketBadges] = await Promise.all([
       // A) Las más recientes por actividad. `sort_activity_at` es la columna
       // generada `coalesce(last_guest_message_at, created_at)`; el orden por
       // `id` desempata para que el corte sea determinista. Ambos los cubre
@@ -430,6 +435,9 @@ export async function GET(request: Request) {
         .eq("hotel_id", activeHotelId),
       // Contactos de staff del hotel activo, para el badge de la bandeja.
       fetchActiveStaffPhones(supabase, activeHotelId),
+      // Solicitudes de servicio sin resolver, para el badge de la fila. UNA
+      // consulta por GET, no una por conversación.
+      fetchTicketBadges(supabase, activeHotelId),
     ]);
 
     if (recentResult.error) {
@@ -488,6 +496,7 @@ export async function GET(request: Request) {
 
     const conversations = buildInboxConversations(convRows, lastMessageByConversationId);
     markStaffConversations(conversations, staffPhones);
+    markTicketBadges(conversations, ticketBadges);
     conversations.sort((a, b) => {
       return getConversationDisplayActivityMs(b) - getConversationDisplayActivityMs(a);
     });
