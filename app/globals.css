@@ -36,6 +36,22 @@
      significan "necesita acción" e "IA activa", y el gris es "Bloqueado". */
   --staff: #6a4fbe;
   --staff-soft: #efeafb;
+  /* Solicitudes de servicio (`service_tickets`) en la fila de la bandeja: un
+     color por categoría para reconocerla de un vistazo. Ninguno reusa el rojo,
+     el dorado ni el verde porque en ESE MISMO renglón ya significan
+     "pendiente", "humano" e "IA activa". El badge SIEMPRE escribe la categoría
+     al lado: el color es refuerzo, nunca la única señal (hay tablets con brillo
+     bajo y gente que no distingue estos tonos). */
+  --tk-housekeeping: #0f7d87;
+  --tk-housekeeping-soft: #e0f2f3;
+  --tk-mantenimiento: #3d6ba8;
+  --tk-mantenimiento-soft: #e6eef8;
+  --tk-room-service: #a03d78;
+  --tk-room-service-soft: #f9e9f2;
+  /* `otro` va en neutro a propósito: es el cajón de sastre del clasificador y
+     darle color propio lo haría competir con las tres categorías reales. */
+  --tk-otro: #6b665e;
+  --tk-otro-soft: #f1ece4;
   /* Doble check "leído". Es el único azul de la paleta y está puesto a
      propósito: recepción ya trae aprendido de WhatsApp que el ✓✓ azul significa
      que el huésped lo abrió, así que no hay que explicarlo en ninguna parte. */
@@ -96,6 +112,14 @@ html.dark {
   --gold-soft: #33280f;
   --staff: #a795ee;
   --staff-soft: #2b2440;
+  --tk-housekeeping: #4bc3cf;
+  --tk-housekeeping-soft: #113034;
+  --tk-mantenimiento: #7fb0e8;
+  --tk-mantenimiento-soft: #182b40;
+  --tk-room-service: #e28cc2;
+  --tk-room-service-soft: #351d2c;
+  --tk-otro: #b8ada2;
+  --tk-otro-soft: #2a231e;
   --blue-read: #5aa8f0;
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.45);
   --shadow: 0 2px 8px rgba(0, 0, 0, 0.55), 0 1px 2px rgba(0, 0, 0, 0.45);

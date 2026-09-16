@@ -31,6 +31,12 @@ import {
   GUEST_NAME_MAX_LENGTH,
   type ConversationDbRow,
 } from "@/lib/conversation-schema";
+import {
+  ticketBadgeAriaLabel,
+  ticketBadgeText,
+  type InboxTicketBadge,
+} from "@/lib/inbox-ticket-badges";
+import type { TicketArea } from "@/lib/service-tickets";
 import { resolveDeliveryFailureReason } from "@/lib/delivery-failure-copy";
 import {
   COMPOSER_LANGUAGE_OPTIONS,
@@ -482,6 +488,69 @@ function TriageEscalatedBadge() {
     >
       <Dot size={6} color="rgba(255,255,255,.85)" />
       Sin atender
+    </span>
+  );
+}
+
+/**
+ * Color de cada categoría de solicitud. Los tokens viven en `globals.css` y
+ * tienen su versión de modo oscuro; acá se nombran uno por uno en vez de armar
+ * `var(--tk-${categoria})` para que el token sea grepeable desde el CSS.
+ */
+const TICKET_BADGE_TONES: Readonly<Record<TicketArea, { color: string; background: string }>> = {
+  housekeeping: { color: "var(--tk-housekeeping)", background: "var(--tk-housekeeping-soft)" },
+  mantenimiento: { color: "var(--tk-mantenimiento)", background: "var(--tk-mantenimiento-soft)" },
+  room_service: { color: "var(--tk-room-service)", background: "var(--tk-room-service-soft)" },
+  otro: { color: "var(--tk-otro)", background: "var(--tk-otro-soft)" },
+};
+
+/**
+ * Solicitud de servicio pendiente del huésped: qué pidió y para qué habitación.
+ *
+ * Ocupa el lugar del distintivo "Sin atender" (nunca salen los dos juntos) y
+ * gana él cuando hay solicitud, porque dice lo mismo pero concreto: "alguien
+ * espera algo" contra "Housekeeping · Hab 302". El semáforo de al lado no se
+ * toca: sigue diciendo quién controla la conversación, que es otra pregunta.
+ *
+ * El punto ámbar de "en curso" es EL MISMO ámbar que usa la pantalla de
+ * Solicitudes para ese estado. Deliberado: si el color del estado significara
+ * una cosa allá y otra acá, quien trabaja con las dos pantallas abiertas
+ * tendría que traducir. Por eso el fondo codifica la categoría y el punto, el
+ * estado.
+ *
+ * Sin `title`: recepción trabaja desde tablet y ahí el hover no existe. Todo
+ * lo que hay que saber está escrito, y lo que no cabe visualmente (el estado,
+ * las otras solicitudes) va en el `aria-label` para el lector de pantalla.
+ */
+function ServiceTicketBadge({ badge }: { badge: InboxTicketBadge }) {
+  const tone = TICKET_BADGE_TONES[badge.categoria];
+  return (
+    <span className="inline-flex min-w-0 shrink items-center gap-1.5">
+      <span
+        className="grotesk inline-flex min-w-0 items-center gap-1.5"
+        style={{
+          maxWidth: 178,
+          padding: "3px 9px",
+          borderRadius: 999,
+          fontSize: 10.5,
+          fontWeight: 700,
+          color: tone.color,
+          background: tone.background,
+        }}
+        aria-label={ticketBadgeAriaLabel(badge)}
+      >
+        {badge.enCurso && <Dot size={6} color="var(--gold)" />}
+        <span className="truncate">{ticketBadgeText(badge)}</span>
+      </span>
+      {badge.extraCount > 0 && (
+        <span
+          className="ibx-mono shrink-0"
+          aria-hidden
+          style={{ fontSize: 10.5, fontWeight: 700, color: "var(--text-secondary)" }}
+        >
+          +{badge.extraCount}
+        </span>
+      )}
     </span>
   );
 }
@@ -4521,6 +4590,7 @@ export default function InboxApp() {
     const showAutoReactivated =
       statusVariant === "ia" && c.autoReactivatedAt !== null && c.autoReactivatedAt !== undefined;
     const showTriage = c.triageEscalatedAt !== null && c.triageEscalatedAt !== undefined;
+    const ticketBadge = c.ticketBadge ?? null;
     const { emoji, rest } = splitLeadingEmoji(c.guest.name);
     /*
       Mientras el agente redacta, el preview deja de mostrar el último mensaje y
@@ -4638,7 +4708,13 @@ export default function InboxApp() {
           <div className="mt-1 flex min-w-0 items-center gap-2 overflow-hidden" style={{ minHeight: 20 }}>
             <GuestStatusPrefix variant={statusVariant} />
             {showAutoReactivated && <AutoReactivatedBadge />}
-            {showTriage && <TriageEscalatedBadge />}
+            {/* Nunca los dos: con solicitud pendiente gana el badge concreto y
+                "Sin atender" se calla. Ver `ServiceTicketBadge`. */}
+            {ticketBadge ? (
+              <ServiceTicketBadge badge={ticketBadge} />
+            ) : showTriage ? (
+              <TriageEscalatedBadge />
+            ) : null}
             {showProperty && (
               <span className="min-w-0 flex-1 truncate" style={{ fontSize: 11, color: "var(--text-secondary)" }}>
                 {propertyLabel}

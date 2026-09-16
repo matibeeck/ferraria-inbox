@@ -1,4 +1,5 @@
 import type { MessageChannel } from "@/lib/channels";
+import type { InboxTicketBadge } from "@/lib/inbox-ticket-badges";
 
 /** Estado de la conversación en la operación (cola de recepción + IA). */
 export type OperationalStatus = "ai_active" | "requires_attention" | "closed";
@@ -262,4 +263,23 @@ export interface Conversation {
    * mocks) simplemente no lo traen y se pintan como huésped.
    */
   isStaff?: boolean;
+  /**
+   * Solicitud de servicio pendiente (abierta o en curso) de esta conversación,
+   * o `null`/ausente si no tiene ninguna.
+   *
+   * NO es una columna de `conversations`: sale de `service_tickets` y lo derivan
+   * `GET /api/inbox` y `GET /api/inbox/ticket-badges`. Realtime no lo trae nunca
+   * — el canal solo escucha `conversations` y los mensajes — y por eso existe el
+   * refresco periódico del hook.
+   *
+   * El merge de Realtime (`{ ...prev, ...cambios }`) lo conserva solo, igual que
+   * `isStaff`. Consecuencia aceptada: una conversación que NACE por Realtime
+   * queda sin badge hasta el próximo refresco.
+   *
+   * Cuando tiene valor, REEMPLAZA al distintivo rojo "Sin atender" en la fila:
+   * los dos ocupan el mismo lugar y este dice algo más concreto. El semáforo de
+   * estado (IA / Humano / Pendiente) sigue apareciendo, porque responde a otra
+   * pregunta: quién tiene el control de la conversación.
+   */
+  ticketBadge?: InboxTicketBadge | null;
 }
