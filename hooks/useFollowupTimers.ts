@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { followupReloadDelayMs } from "@/lib/followup-refresh";
 import { createClient } from "@/lib/supabase/client";
 
 type FollowupRow = {
@@ -45,7 +46,12 @@ export type UseFollowupTimersResult = {
 const VISIBILITY_MIN_AGE_MS = 60 * 1000;
 const FALLBACK_REFRESH_MS = 10 * 60 * 1000;
 /** Junta ráfagas de eventos (p. ej. varios UPDATE de la misma cotización). */
-const EVENT_DEBOUNCE_MS = 1500;
+const EVENT_DEBOUNCE_MS = 5000;
+/**
+ * Espacio mínimo entre dos recargas disparadas por evento. Aunque Realtime no
+ * pare de avisar, el RPC no corre más de una vez cada 30 s por pestaña.
+ */
+const EVENT_MIN_GAP_MS = 30 * 1000;
 
 function buildFollowupMap(rows: FollowupRow[] | null): Map<string, FollowupTimerEntry> {
   const next = new Map<string, FollowupTimerEntry>();
@@ -107,13 +113,19 @@ export function useFollowupTimers(): UseFollowupTimersResult {
   }, []);
 
   const refreshFollowups = useCallback(() => {
-    if (debounceTimerRef.current != null) {
-      window.clearTimeout(debounceTimerRef.current);
-    }
+    // Ya hay una recarga programada: el evento nuevo se sube a esa. No se
+    // reprograma, para que una ráfaga sin pausas no la posponga para siempre.
+    if (debounceTimerRef.current != null) return;
+    const delay = followupReloadDelayMs({
+      nowMs: Date.now(),
+      lastLoadAtMs: lastLoadAtRef.current,
+      debounceMs: EVENT_DEBOUNCE_MS,
+      minGapMs: EVENT_MIN_GAP_MS,
+    });
     debounceTimerRef.current = window.setTimeout(() => {
       debounceTimerRef.current = null;
       void loadFollowups();
-    }, EVENT_DEBOUNCE_MS);
+    }, delay);
   }, [loadFollowups]);
 
   useEffect(() => {
