@@ -1,5 +1,9 @@
 import { NextResponse } from "next/server";
-import { CONVERSATIONS_TABLE, type ConversationDbRow } from "@/lib/conversation-schema";
+import {
+  CONVERSATIONS_TABLE,
+  CONVERSATION_SELECT_COLUMNS,
+  type ConversationDbRow,
+} from "@/lib/conversation-schema";
 import { requireSessionUser } from "@/lib/auth/require-user";
 import { requireCapability } from "@/lib/auth/require-capability";
 import {
@@ -9,6 +13,8 @@ import {
 import { getSupabaseServerClient } from "@/lib/supabase-server";
 
 export const dynamic = "force-dynamic";
+
+const isDev = process.env.NODE_ENV !== "production";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -53,21 +59,26 @@ export async function POST(request: Request, context: RouteContext) {
       })
       .eq("id", conversationId)
       .eq("hotel_id", activeHotelId)
-      .select("*")
+      // Las columnas de bandeja, no `*`: el cliente aplica esta fila con
+      // `applyConversationRowPatch`, que no lee nada más.
+      .select(CONVERSATION_SELECT_COLUMNS)
       .maybeSingle();
 
     if (error) {
-      console.error("[conversations block POST]", error);
-      return NextResponse.json({ error: error.message }, { status: 502 });
+      console.error("[conversations block POST]", error.code ?? "sin_code");
+      return NextResponse.json(
+        { error: isDev ? error.message : "No se pudo actualizar la conversación" },
+        { status: 502 }
+      );
     }
     if (!data) {
       return NextResponse.json({ error: "Conversación no encontrada" }, { status: 404 });
     }
 
-    return NextResponse.json({ ok: true, conversation: data as ConversationDbRow });
+    return NextResponse.json({ ok: true, conversation: data as unknown as ConversationDbRow });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Error desconocido";
-    console.error("[conversations block POST]", e);
-    return NextResponse.json({ error: msg }, { status: 500 });
+    console.error("[conversations block POST]", isDev ? e : "error inesperado");
+    return NextResponse.json({ error: isDev ? msg : "Error desconocido" }, { status: 500 });
   }
 }

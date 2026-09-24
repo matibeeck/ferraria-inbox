@@ -25,7 +25,6 @@ import { STAFF_CONTACTS_TABLE, normalizeStaffPhone } from "@/lib/staff-contacts"
 import { fetchTicketBadges, markTicketBadges } from "@/lib/inbox-ticket-badges-server";
 import type { Conversation } from "@/lib/inbox-types";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
-import { MESSAGES_LIMIT } from "@/lib/message-limits";
 import {
   buildDescKeysetOrFilter,
   encodeKeysetCursor,
@@ -212,10 +211,6 @@ function emptyInboxResponse(availableHotels: AvailableHotel[] = [], activeHotelI
   return NextResponse.json({
     conversations: [],
     fetchedConversations: 0,
-    // La bandeja ya no embarca historial: el hilo se pide aparte a
-    // GET /api/inbox/messages. Se mantiene el campo para no romper el contrato.
-    fetchedMessages: 0,
-    messageLimit: MESSAGES_LIMIT,
     availableHotels,
     activeHotelId,
     hotelWhatsappById: {},
@@ -340,8 +335,6 @@ export async function GET(request: Request) {
         return NextResponse.json({
           conversations: [],
           fetchedConversations: 0,
-          fetchedMessages: 0,
-          messageLimit: MESSAGES_LIMIT,
           availableHotels,
           activeHotelId,
           hotelWhatsappById: hotelWhatsappMapToRecord(hotelWhatsappById),
@@ -411,8 +404,6 @@ export async function GET(request: Request) {
       return NextResponse.json({
         conversations,
         fetchedConversations: convRows.length,
-        fetchedMessages: 0,
-        messageLimit: MESSAGES_LIMIT,
         availableHotels,
         activeHotelId,
         hotelWhatsappById: hotelWhatsappMapToRecord(hotelWhatsappById),
@@ -537,9 +528,6 @@ export async function GET(request: Request) {
     return NextResponse.json({
       conversations,
       fetchedConversations: convRows.length,
-      // Cero por diseño: la bandeja ya no embarca historial.
-      fetchedMessages: 0,
-      messageLimit: MESSAGES_LIMIT,
       availableHotels,
       activeHotelId,
       hotelWhatsappById: hotelWhatsappMapToRecord(hotelWhatsappById),

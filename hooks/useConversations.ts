@@ -18,7 +18,6 @@ type AvailableHotel = {
 
 type InboxResponse = {
   conversations: Conversation[];
-  fetchedRows?: number;
   /**
    * Hay otra página por keyset. La bandeja llega de a 30 (más el set protegido
    * en la primera) y el resto se pide con `?before=<nextCursor>` al bajar.

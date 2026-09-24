@@ -17,10 +17,10 @@ export const dynamic = "force-dynamic";
  *    si el mensaje salió o no, y decirle a la recepcionista "No se envió" sin
  *    saberlo la empuja a reenviar y a duplicarle el mensaje al huésped.
  *
- * Deliberadamente NO reusa `GET /api/inbox/messages`: esa ruta barre el
- * historial completo del huésped paginando hasta 15.000 filas. Dispararla cada
- * 8 s por burbuja sería un martillo sobre `Wubby_Whatsapp`. Acá es una sola
- * fila por el índice `(hotel_id, client_temp_id)`.
+ * Deliberadamente NO reusa `GET /api/inbox/messages`: esa ruta trae una página
+ * de 50 mensajes con sus acuses y su media firmada. Dispararla cada 8 s por
+ * burbuja sería trabajo de más sobre `Wubby_Whatsapp` y Storage. Acá es una
+ * sola fila por el índice `(hotel_id, client_temp_id)`.
  *
  * Tampoco devuelve el mensaje entero: la burbuja ya tiene el texto en pantalla.
  * Solo necesita saber si existe, con qué `id` real y con qué `wamid`.

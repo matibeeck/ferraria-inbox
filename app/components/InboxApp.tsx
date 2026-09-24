@@ -1526,8 +1526,8 @@ type ThreadView = {
  * Saca las filas de reacción del flujo de burbujas y las resuelve contra el
  * mensaje cuyo `wamid` coinciden, al estilo WhatsApp.
  *
- * Dos pasadas y un Map por `wamid`, NO un `find()` por burbuja: el hilo llega
- * hasta `MESSAGES_LIMIT` mensajes y la resolución sería cuadrática.
+ * Dos pasadas y un Map por `wamid`, NO un `find()` por burbuja: con "Cargar
+ * anteriores" el hilo crece de a 50 y la resolución sería cuadrática.
  *
  * Reglas:
  * - Varias reacciones al mismo mensaje son filas distintas; gana la de id mayor.
