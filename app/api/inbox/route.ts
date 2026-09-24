@@ -7,8 +7,8 @@ import {
 } from "@/lib/hotel-whatsapp-map";
 import { buildReactivateAiFields } from "@/lib/inbox-patch";
 import {
+  availableHotelsFrom,
   resolveActiveHotelId,
-  resolveAvailableHotels,
   type AvailableHotel,
 } from "@/lib/inbox-tenant";
 import {
@@ -29,8 +29,6 @@ import { MESSAGES_LIMIT, POSTGREST_PAGE_SIZE } from "@/lib/message-limits";
 import { WUBBY_PREVIEW_COLUMNS, WUBBY_TABLE, type WubbyWhatsappRow } from "@/lib/wubby-schema";
 
 export const dynamic = "force-dynamic";
-
-const HOTELS_TABLE = "hotels";
 
 /**
  * Embedding PostgREST: cada fila de `conversations` con su ÚLTIMO mensaje.
@@ -221,10 +219,15 @@ export async function GET(request: Request) {
     const gate = await requireCapability(supabase, auth.user, "verConversacionesHuespedes");
     if (gate.response) return gate.response;
     const allowedHotelIds = gate.allowedHotelIds;
+    // Filas de `hotels` ya leídas por el gate (en paralelo con `hotel_users`),
+    // recortadas a los hoteles que ESTE endpoint puede ver. Reemplazan las dos
+    // lecturas de `hotels` que había acá: selector y número de WhatsApp + flags.
+    const allowedSet = new Set(allowedHotelIds);
+    const hotelRows = gate.tenant.hotels.filter((hotel) => allowedSet.has(hotel.id));
     const searchParams = new URL(request.url).searchParams;
     const requestedHotelId = searchParams.get("hotelId")?.trim() ?? "";
     const searchTerm = searchParams.get("q")?.trim() ?? "";
-    const availableHotels = await resolveAvailableHotels(supabase, allowedHotelIds);
+    const availableHotels = availableHotelsFrom(hotelRows, allowedHotelIds);
     const { activeHotelId, forbidden } = resolveActiveHotelId(
       requestedHotelId,
       allowedHotelIds,
@@ -251,21 +254,13 @@ export async function GET(request: Request) {
       return emptyInboxResponse(availableHotels, activeHotelId);
     }
 
-    const { data: hotelWaRows, error: hotelWaError } = await supabase
-      .from(HOTELS_TABLE)
-      .select("id, whatsapp_number, engine_enabled, templates_enabled")
-      .in("id", allowedHotelIds);
-
-    if (hotelWaError) {
-      console.error("[inbox GET] hotels whatsapp", hotelWaError);
-      return NextResponse.json({ error: hotelWaError.message }, { status: 502 });
-    }
-
-    const hotelWhatsappById = buildHotelWhatsappByIdMap(hotelWaRows ?? []);
+    const hotelWhatsappById = buildHotelWhatsappByIdMap(
+      hotelRows.map((hotel) => ({ id: hotel.id, whatsapp_number: hotel.whatsappNumber }))
+    );
 
     /**
      * Flag de engine del hotel ACTIVO. Sale de la MISMA fila que el
-     * `whatsapp_number`: una columna más en el select de arriba, CERO consultas
+     * `whatsapp_number` (directorio de `hotels` del gate): CERO consultas
      * nuevas — esta route salió de una cirugía de OOM y no admite trabajo extra
      * por GET, y menos por conversación.
      *
@@ -278,14 +273,13 @@ export async function GET(request: Request) {
      * personal (el guard de staff vive en el engine), así que registrar
      * contactos ahí haría que la feature pareciera rota.
      */
-    const engineEnabled = (hotelWaRows ?? []).some(
-      (row: { id?: unknown; engine_enabled?: unknown }) =>
-        String(row.id ?? "") === activeHotelId && row.engine_enabled === true
+    const engineEnabled = hotelRows.some(
+      (hotel) => hotel.id === activeHotelId && hotel.engineEnabled
     );
 
     /**
      * `hotels.templates_enabled` del hotel ACTIVO. Mismo molde que el flag de
-     * arriba: una columna más en el select que ya existía, cero consultas nuevas
+     * arriba: sale del directorio de `hotels` del gate, cero consultas nuevas
      * y un booleano del hotel abierto, no un mapa por hotel.
      *
      * Apaga el envío manual de plantillas en la UI. Hay hoteles donde las
@@ -297,9 +291,8 @@ export async function GET(request: Request) {
      * rechazar con 403. El gate real vive en `POST /api/send-whatsapp-template`;
      * esto es solo UI.
      */
-    const templatesEnabled = (hotelWaRows ?? []).some(
-      (row: { id?: unknown; templates_enabled?: unknown }) =>
-        String(row.id ?? "") === activeHotelId && row.templates_enabled === true
+    const templatesEnabled = hotelRows.some(
+      (hotel) => hotel.id === activeHotelId && hotel.templatesEnabled
     );
 
     // Camino de búsqueda. Aditivo: sin `q` nada de esto corre y el resto del

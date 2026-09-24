@@ -1,9 +1,11 @@
+import { cache } from "react";
 import type { SupabaseClient, User } from "@supabase/supabase-js";
 import {
   capabilitiesForRoles,
   isHotelRole,
   type CapabilityMap,
-} from "@/lib/permissions";
+} from "./permissions.ts";
+import { memoPerRequest } from "./request-memo.ts";
 
 const HOTEL_USERS_TABLE = "hotel_users";
 const HOTELS_TABLE = "hotels";
@@ -11,6 +13,20 @@ const HOTELS_TABLE = "hotels";
 export type AvailableHotel = {
   id: string;
   name: string;
+};
+
+/**
+ * Una fila de `hotels` con todo lo que los endpoints del inbox necesitan saber
+ * del hotel: si aparece en el selector (`isActive`, `name`), cuál es su número
+ * de WhatsApp (para clasificar qué mensajes son de la IA) y sus flags.
+ */
+export type HotelRecord = {
+  id: string;
+  name: string;
+  isActive: boolean;
+  whatsappNumber: string | null;
+  engineEnabled: boolean;
+  templatesEnabled: boolean;
 };
 
 /** Una fila de `hotel_users`: a qué hotel pertenece el usuario, con qué rol y área. */
@@ -36,6 +52,12 @@ export type TenantContext = {
   capabilities: CapabilityMap;
   allowedHotelIds: string[];
   guestDataHotelIds: string[];
+  /**
+   * Filas de `hotels` de los hoteles en `allowedHotelIds` (activos o no),
+   * ordenadas por nombre como las devuelve la base. Nunca trae hoteles fuera de
+   * `allowedHotelIds`: el recorte se hace al armar el contexto.
+   */
+  hotels: HotelRecord[];
 };
 
 function normalizeRole(raw: unknown): string | null {
@@ -44,13 +66,46 @@ function normalizeRole(raw: unknown): string | null {
   return value ? value : null;
 }
 
-async function fetchAllHotelIds(supabase: SupabaseClient): Promise<string[]> {
-  const { data, error } = await supabase.from(HOTELS_TABLE).select("id");
+const HOTEL_DIRECTORY_COLUMNS =
+  "id, name, is_active, whatsapp_number, engine_enabled, templates_enabled";
+
+async function loadHotelDirectory(supabase: SupabaseClient): Promise<HotelRecord[]> {
+  const { data, error } = await supabase
+    .from(HOTELS_TABLE)
+    .select(HOTEL_DIRECTORY_COLUMNS)
+    .order("name", { ascending: true });
+
   if (error) {
     throw new Error(error.message);
   }
-  return (data ?? []).map((row) => String(row.id)).filter(Boolean);
+
+  return (data ?? [])
+    .map((row) => ({
+      id: row.id != null ? String(row.id).trim() : "",
+      name: String(row.name ?? row.id),
+      isActive: row.is_active === true,
+      whatsappNumber: row.whatsapp_number != null ? String(row.whatsapp_number) : null,
+      engineEnabled: row.engine_enabled === true,
+      templatesEnabled: row.templates_enabled === true,
+    }))
+    .filter((row) => row.id);
 }
+
+/**
+ * TODAS las filas de `hotels`, una sola lectura por request.
+ *
+ * Se trae la tabla entera (son pocos hoteles, muy lejos del tope de 1000 de
+ * PostgREST) para que la lectura NO dependa de `hotel_users` y pueda ir en
+ * paralelo con ella. Esto corre con service role: el directorio completo nunca
+ * sale de este módulo sin pasar por el recorte de `allowedHotelIds`.
+ *
+ * Una sola lectura cubre lo que antes eran hasta tres: la lista de ids para
+ * `super_admin`, el selector de hoteles activos y el `whatsapp_number` + flags.
+ */
+const getHotelDirectory = cache(
+  (supabase: SupabaseClient): Promise<HotelRecord[]> =>
+    memoPerRequest("hotel-directory", () => loadHotelDirectory(supabase))
+);
 
 /** Filas crudas de `hotel_users` para el usuario. */
 export async function resolveUserMemberships(
@@ -90,20 +145,36 @@ function hasSuperAdmin(memberships: readonly HotelMembership[]): boolean {
  * Un rol NO reconocido (typo, `null`) no aporta hoteles a `guestDataHotelIds`:
  * lista blanca estricta, igual que la matriz de capacidades.
  */
-export async function resolveTenantContext(
-  supabase: SupabaseClient,
-  user: User
-): Promise<TenantContext> {
-  const memberships = await resolveUserMemberships(supabase, user);
+export const resolveTenantContext = cache(
+  (supabase: SupabaseClient, user: User): Promise<TenantContext> =>
+    memoPerRequest(`tenant:${user.id}`, () => loadTenantContext(supabase, user))
+);
+
+/** Hoteles del directorio que están en `ids`, conservando el orden por nombre. */
+function pickHotels(directory: readonly HotelRecord[], ids: readonly string[]): HotelRecord[] {
+  const wanted = new Set(ids);
+  return directory.filter((hotel) => wanted.has(hotel.id));
+}
+
+/**
+ * `hotel_users` y `hotels` son independientes: van en paralelo, un solo viaje
+ * de ida y vuelta en vez de dos o tres en serie.
+ */
+async function loadTenantContext(supabase: SupabaseClient, user: User): Promise<TenantContext> {
+  const [memberships, directory] = await Promise.all([
+    resolveUserMemberships(supabase, user),
+    getHotelDirectory(supabase),
+  ]);
   const capabilities = capabilitiesForRoles(memberships.map((m) => m.role));
 
   if (hasSuperAdmin(memberships)) {
-    const every = await fetchAllHotelIds(supabase);
+    const every = directory.map((hotel) => hotel.id);
     return {
       memberships,
       capabilities,
       allowedHotelIds: every,
       guestDataHotelIds: every,
+      hotels: [...directory],
     };
   }
 
@@ -123,7 +194,13 @@ export async function resolveTenantContext(
 
   warnOnMixedRoles(user, memberships, allowedHotelIds, guestDataHotelIds);
 
-  return { memberships, capabilities, allowedHotelIds, guestDataHotelIds };
+  return {
+    memberships,
+    capabilities,
+    allowedHotelIds,
+    guestDataHotelIds,
+    hotels: pickHotels(directory, allowedHotelIds),
+  };
 }
 
 /**
@@ -176,29 +253,30 @@ export async function resolveAllowedHotelIds(
   return allowedHotelIds;
 }
 
+/**
+ * Hoteles del selector: activos, dentro de `allowedHotelIds`, por nombre.
+ *
+ * Sin viaje propio: sale del directorio de `hotels` que ya se leyó en esta
+ * request (lo lee `resolveTenantContext`). Si se llama sin contexto previo, lo
+ * lee una vez y queda para el resto de la request.
+ */
 export async function resolveAvailableHotels(
   supabase: SupabaseClient,
   allowedHotelIds: string[]
 ): Promise<AvailableHotel[]> {
   if (allowedHotelIds.length === 0) return [];
+  const directory = await getHotelDirectory(supabase);
+  return availableHotelsFrom(directory, allowedHotelIds);
+}
 
-  const { data: hotelRows, error } = await supabase
-    .from(HOTELS_TABLE)
-    .select("id, name")
-    .eq("is_active", true)
-    .in("id", allowedHotelIds)
-    .order("name", { ascending: true });
-
-  if (error) {
-    throw new Error(error.message);
-  }
-
-  return (hotelRows ?? [])
-    .map((row) => ({
-      id: String(row.id),
-      name: String(row.name ?? row.id),
-    }))
-    .filter((row) => row.id);
+/** Versión pura de `resolveAvailableHotels` sobre filas ya leídas. */
+export function availableHotelsFrom(
+  hotels: readonly HotelRecord[],
+  allowedHotelIds: readonly string[]
+): AvailableHotel[] {
+  return pickHotels(hotels, allowedHotelIds)
+    .filter((hotel) => hotel.isActive)
+    .map((hotel) => ({ id: hotel.id, name: hotel.name }));
 }
 
 export function resolveActiveHotelId(

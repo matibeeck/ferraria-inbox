@@ -1,9 +1,12 @@
+import { cache } from "react";
 import { createServerClient } from "@supabase/ssr";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
 
+import { memoPerRequest } from "@/lib/request-memo";
 import { cookieDomainOption } from "./cookie-domain";
 
-export async function createClient() {
+async function buildClient(): Promise<SupabaseClient> {
   const cookieStore = await cookies();
 
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -29,3 +32,12 @@ export async function createClient() {
     },
   });
 }
+
+/**
+ * Cliente SSR con las cookies de la request. Uno solo por request: `cache()`
+ * deduplica en Server Components y `memoPerRequest` en Route Handlers (ver
+ * `lib/request-memo.ts` para por qué hacen falta los dos).
+ */
+export const createClient = cache(
+  (): Promise<SupabaseClient> => memoPerRequest("supabase-ssr-client", buildClient)
+);

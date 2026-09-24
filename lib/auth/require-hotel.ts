@@ -2,10 +2,12 @@ import { NextResponse } from "next/server";
 import type { SupabaseClient, User } from "@supabase/supabase-js";
 import { CONVERSATIONS_TABLE } from "@/lib/conversation-schema";
 import {
+  availableHotelsFrom,
   resolveActiveHotelId,
-  resolveAllowedHotelIds,
-  resolveAvailableHotels,
+  resolveTenantContext,
   type AvailableHotel,
+  type HotelRecord,
+  type TenantContext,
 } from "@/lib/inbox-tenant";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
 import { requireCapability } from "@/lib/auth/require-capability";
@@ -30,6 +32,11 @@ export type ActiveHotelResult = {
   allowedHotelIds: string[];
   availableHotels: AvailableHotel[];
   activeHotelId: string | null;
+  /**
+   * Filas de `hotels` (número de WhatsApp y flags) de `allowedHotelIds`, ya
+   * leídas en esta request. Usalas en vez de volver a consultar `hotels`.
+   */
+  hotels: HotelRecord[];
 };
 
 export async function requireActiveHotel(
@@ -41,7 +48,10 @@ export async function requireActiveHotel(
 
   // Con `capability`, el gate de rol y el recorte de hoteles se resuelven en la
   // misma pasada: sin ella el comportamiento queda idéntico al de antes.
+  // `hotel_users` y `hotels` se leen UNA vez por request, en paralelo, dentro
+  // de `resolveTenantContext`; de acá en adelante no hay más viajes de tenencia.
   let allowedHotelIds: string[];
+  let tenant: TenantContext;
   if (options?.capability) {
     const gate = await requireCapability(supabase, user, options.capability);
     if (gate.response) {
@@ -51,12 +61,17 @@ export async function requireActiveHotel(
         allowedHotelIds: [],
         availableHotels: [],
         activeHotelId: null,
+        hotels: [],
       };
     }
     allowedHotelIds = gate.allowedHotelIds;
+    tenant = gate.tenant;
   } else {
-    allowedHotelIds = await resolveAllowedHotelIds(supabase, user);
+    tenant = await resolveTenantContext(supabase, user);
+    allowedHotelIds = tenant.allowedHotelIds;
   }
+  const allowedSet = new Set(allowedHotelIds);
+  const hotels = tenant.hotels.filter((hotel) => allowedSet.has(hotel.id));
 
   const requestedHotelId = (
     options?.requestedHotelId ??
@@ -64,7 +79,7 @@ export async function requireActiveHotel(
     ""
   ).trim();
 
-  const availableHotels = await resolveAvailableHotels(supabase, allowedHotelIds);
+  const availableHotels = availableHotelsFrom(hotels, allowedHotelIds);
   const { activeHotelId, forbidden } = resolveActiveHotelId(
     requestedHotelId,
     allowedHotelIds,
@@ -81,10 +96,11 @@ export async function requireActiveHotel(
       allowedHotelIds,
       availableHotels,
       activeHotelId: null,
+      hotels,
     };
   }
 
-  return { response: null, supabase, allowedHotelIds, availableHotels, activeHotelId };
+  return { response: null, supabase, allowedHotelIds, availableHotels, activeHotelId, hotels };
 }
 
 /**

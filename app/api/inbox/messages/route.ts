@@ -6,18 +6,13 @@ import {
   buildHotelWhatsappByIdMap,
   resolveHotelWaIdentitiesForRow,
 } from "@/lib/hotel-whatsapp-map";
-import {
-  resolveActiveHotelId,
-  resolveAvailableHotels,
-} from "@/lib/inbox-tenant";
+import { availableHotelsFrom, resolveActiveHotelId } from "@/lib/inbox-tenant";
 import type { Message } from "@/lib/inbox-types";
 import { requireSessionUser } from "@/lib/auth/require-user";
 import { requireCapability } from "@/lib/auth/require-capability";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
 
 export const dynamic = "force-dynamic";
-
-const HOTELS_TABLE = "hotels";
 
 export async function GET(request: Request) {
   try {
@@ -36,7 +31,11 @@ export async function GET(request: Request) {
     const gate = await requireCapability(supabase, auth.user, "verConversacionesHuespedes");
     if (gate.response) return gate.response;
     const allowedHotelIds = gate.allowedHotelIds;
-    const availableHotels = await resolveAvailableHotels(supabase, allowedHotelIds);
+    // Filas de `hotels` ya leídas por el gate, recortadas a lo que este endpoint
+    // puede ver: selector y `whatsapp_number` sin viajes extra.
+    const allowedSet = new Set(allowedHotelIds);
+    const hotelRows = gate.tenant.hotels.filter((hotel) => allowedSet.has(hotel.id));
+    const availableHotels = availableHotelsFrom(hotelRows, allowedHotelIds);
     const { activeHotelId, forbidden } = resolveActiveHotelId(
       requestedHotelId,
       allowedHotelIds,
@@ -74,19 +73,10 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: "La conversación no tiene teléfono de huésped" }, { status: 400 });
     }
 
-    const { data: hotelWaRows, error: hotelWaError } = await supabase
-      .from(HOTELS_TABLE)
-      .select("id, whatsapp_number")
-      .eq("id", activeHotelId)
-      .maybeSingle();
-
-    if (hotelWaError) {
-      console.error("[inbox messages GET] hotel whatsapp", hotelWaError);
-      return NextResponse.json({ error: hotelWaError.message }, { status: 502 });
-    }
-
+    // `whatsapp_number` del hotel activo, resuelto por `hotel_id` desde `hotels`.
+    const activeHotelRow = hotelRows.find((hotel) => hotel.id === activeHotelId);
     const hotelWhatsappById = buildHotelWhatsappByIdMap(
-      hotelWaRows ? [{ id: activeHotelId, whatsapp_number: hotelWaRows.whatsapp_number }] : []
+      activeHotelRow ? [{ id: activeHotelId, whatsapp_number: activeHotelRow.whatsappNumber }] : []
     );
 
     // `conversationId` como criterio principal; la identidad queda de respaldo
