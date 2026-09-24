@@ -92,7 +92,12 @@ const PROTECTED_CONVERSATIONS_FILTER = [
  * keyset. Si viajara con menos columnas, la fila saldría incompleta en
  * "Atención" y cambiaría de forma al llegar por la otra vía.
  */
-const PROTECTED_CONVERSATIONS_LIMIT = 50;
+/*
+ * 100 y no 50: el hotel con más carga tenía 97 protegidas el 2026-09-24. Con
+ * 50, la mitad de las pendientes viejas solo aparecía bajando con el scroll, y
+ * "Atención" es justo la vista en la que nada puede faltar.
+ */
+const PROTECTED_CONVERSATIONS_LIMIT = 100;
 
 /**
  * RPC de búsqueda por nombre y teléfono. `SECURITY INVOKER` y `STABLE`: pliega
