@@ -12,6 +12,7 @@ import {
   resolveHotelWaIdentitiesForRow,
 } from "@/lib/hotel-whatsapp-map";
 import { MESSAGES_LIMIT } from "@/lib/message-limits";
+import { truncateListPreview } from "@/lib/inbox-preview";
 import {
   COLOMBIA_TIME_ZONE,
   parseWhatsappInstant,
@@ -1027,8 +1028,7 @@ function buildConversationFromRow(
     blocked: readBoolCol(cr.blocked, false),
     blockedAt: cr.blocked_at,
     request: requestValue,
-    lastMessagePreview:
-      parts.lastPreview.length > 120 ? `${parts.lastPreview.slice(0, 117)}…` : parts.lastPreview,
+    lastMessagePreview: truncateListPreview(parts.lastPreview),
     lastMessageAt: parts.lastMessageAt,
     lastActivityIso: parts.lastActivityIso,
     unreadCount: readUnreadCount(cr.unread_count),

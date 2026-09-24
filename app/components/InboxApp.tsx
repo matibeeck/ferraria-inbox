@@ -2496,6 +2496,80 @@ function TemplatesDisabledNote({ className = "" }: { className?: string }) {
   );
 }
 
+/**
+ * Pie de la lista con scroll infinito. Cuando entra en pantalla pide la
+ * siguiente página; el botón queda visible además como camino manual.
+ *
+ * El observer se rearma solo cuando cambia `visibleCount`: si una página no
+ * agregó ninguna fila visible (p. ej. con el chip "Hechas" y una página de
+ * puras conversaciones abiertas), NO se encadenan cargas solas hasta agotar el
+ * hotel. Ahí queda el botón, con texto a la vista, para seguir a mano.
+ */
+function ListLoadMore({
+  hasMore,
+  loading,
+  visibleCount,
+  onLoadMore,
+}: {
+  hasMore: boolean;
+  loading: boolean;
+  visibleCount: number;
+  onLoadMore: () => void;
+}) {
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  const onLoadMoreRef = useRef(onLoadMore);
+  useEffect(() => {
+    onLoadMoreRef.current = onLoadMore;
+  }, [onLoadMore]);
+
+  useEffect(() => {
+    if (!hasMore) return;
+    const node = sentinelRef.current;
+    if (!node || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) onLoadMoreRef.current();
+      },
+      // Pide un poco antes de tocar fondo para que el scroll no se trabe.
+      { rootMargin: "0px 0px 240px 0px" }
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [hasMore, visibleCount]);
+
+  if (!hasMore) return null;
+
+  return (
+    <div ref={sentinelRef} className="flex justify-center px-3 py-3">
+      {loading ? (
+        <span
+          className="inline-flex items-center gap-2 text-[12.5px]"
+          style={{ color: "var(--text-secondary)" }}
+        >
+          <Spinner className="h-3.5 w-3.5 animate-spin" />
+          Cargando más conversaciones…
+        </span>
+      ) : (
+        <button
+          type="button"
+          onClick={onLoadMore}
+          className="d-act grotesk px-3.5 py-2"
+          style={{
+            borderRadius: 9,
+            border: "1px solid var(--border-soft)",
+            background: "var(--bg-card)",
+            color: "var(--text-primary)",
+            fontSize: 12.5,
+            fontWeight: 600,
+          }}
+        >
+          Cargar más conversaciones
+        </button>
+      )}
+    </div>
+  );
+}
+
 export default function InboxApp() {
   const [selectedId, setSelectedId] = useState<string>("");
   const [requestedConversationId, setRequestedConversationId] = useState<string | null>(null);
@@ -2520,7 +2594,9 @@ export default function InboxApp() {
   const {
     conversations: rawConversations,
     setConversations,
-    total: totalConversations,
+    hasMore: hasMoreConversations,
+    loadingMore: loadingMoreConversations,
+    loadMore: loadMoreConversations,
     loading,
     error,
     refetch,
@@ -2668,8 +2744,8 @@ export default function InboxApp() {
 
   const [query, setQuery] = useState("");
   /**
-   * Búsqueda server-side. Alcanza las ~515 conversaciones que quedan fuera del
-   * tope de 300 y que el filtro en memoria no podía ver. Mezcla sus resultados
+   * Búsqueda server-side. Alcanza las conversaciones que todavía no se bajaron
+   * con el scroll y que el filtro en memoria no podía ver. Mezcla sus resultados
    * por id en `conversations` (ver `useInboxSearch`).
    */
   const search = useInboxSearch({
@@ -3096,18 +3172,6 @@ export default function InboxApp() {
    */
   const threadLoading = !!selected && !messagesError && !selected.messagesLoaded;
 
-  /**
-   * Denominador de "COLA OPERATIVA". Es el total del hotel, no el largo del
-   * array: `GET /api/inbox` trae las 300 más recientes por actividad más el set
-   * protegido, así que `conversations.length` diría 301/301 —"ves todo"— con
-   * 495 conversaciones sin cargar.
-   *
-   * Fallback a `conversations.length` mientras el total no llegó: es el
-   * comportamiento anterior, el único número que sí tenemos, y nunca queda por
-   * debajo del numerador. Un 0 se leería como hotel vacío y `undefined` pintaría
-   * "301/undefined".
-   */
-  const queueTotal = totalConversations ?? conversations.length;
 
   /**
    * Los chips describen LA VISTA DE HUÉSPEDES, así que excluyen dos cosas: lo
@@ -3119,9 +3183,11 @@ export default function InboxApp() {
    * vista Huéspedes ya no pinta —el staff vive en su propia vista—, y un
    * "Sin leer 3" con dos filas visibles se lee como un bug.
    *
-   * Siguen siendo cotas inferiores —se cargan 300 de 815—, que es lo que ya
-   * eran. La diferencia es que ahora no se mueven solos. El conteo exacto exige
-   * los totales por filtro desde el servidor, que sigue pendiente.
+   * Son cotas inferiores: cuentan lo que está en memoria (la primera página
+   * de 30, el set protegido y lo que se haya bajado con el scroll). "Sin leer"
+   * y "Atención" quedan casi exactos porque el set protegido las trae de
+   * entrada; "Todas" y "Hechas" crecen a medida que se baja. El conteo exacto
+   * exige totales por filtro desde el servidor, que sigue pendiente.
    */
   const filterCounts = useMemo(() => {
     const base = conversations.filter((c) => !c.isStaff && !search.injectedIds.has(c.id));
@@ -4993,7 +5059,9 @@ export default function InboxApp() {
                 title={
                   staffViewActive
                     ? undefined
-                    : `${guestConversations.length} conversaciones en pantalla de ${queueTotal} del hotel`
+                    : hasMoreConversations
+                      ? `${guestConversations.length} conversaciones cargadas; bajando se cargan más`
+                      : `${guestConversations.length} conversaciones`
                 }
               >
                 {refreshing ? (
@@ -5002,12 +5070,11 @@ export default function InboxApp() {
                     Actualizando…
                   </>
                 ) : staffViewActive ? (
-                  // Sin denominador: `queueTotal` es el total de conversaciones
-                  // del hotel, así que "8/815" se leería como que faltan 807
-                  // contactos del personal por cargar.
                   `${staffConversations.length}`
                 ) : (
-                  `${guestConversations.length}/${queueTotal}`
+                  // Sin denominador: la bandeja ya no cuenta la tabla en cada
+                  // carga. El "+" dice que bajando hay más.
+                  `${guestConversations.length}${hasMoreConversations ? "+" : ""}`
                 )}
               </span>
               <button
@@ -5266,6 +5333,12 @@ export default function InboxApp() {
               ) : (
                 <div className="flex flex-col gap-1 px-1.5 py-1.5">
                   {staffConversations.map(renderStaffRow)}
+                  <ListLoadMore
+                    hasMore={hasMoreConversations}
+                    loading={loadingMoreConversations}
+                    visibleCount={staffConversations.length}
+                    onLoadMore={loadMoreConversations}
+                  />
                 </div>
               )
             ) : (
@@ -5342,6 +5415,16 @@ export default function InboxApp() {
                 )}
                 <div className="flex flex-col gap-1 px-1.5 py-1.5">
                   {guestConversations.map(renderGuestRow)}
+                  {/* La búsqueda no pagina: su lista es exactamente lo que
+                      devolvió el RPC. */}
+                  {!search.active && (
+                    <ListLoadMore
+                      hasMore={hasMoreConversations}
+                      loading={loadingMoreConversations}
+                      visibleCount={guestConversations.length}
+                      onLoadMore={loadMoreConversations}
+                    />
+                  )}
                 </div>
               </>
             )}

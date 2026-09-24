@@ -102,6 +102,13 @@ export type ConversationDbRow = {
   ai_triage_at: string | null;
   created_at: string;
   updated_at: string;
+  /**
+   * Columna generada `coalesce(last_guest_message_at, created_at)`: la clave de
+   * orden de la bandeja y del cursor keyset de `GET /api/inbox`. Opcional
+   * porque solo la pide la consulta de páginas; el PATCH y Realtime no la
+   * necesitan para nada visible.
+   */
+  sort_activity_at?: string | null;
 };
 
 export type InboxPatchAction =

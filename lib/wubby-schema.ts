@@ -117,9 +117,12 @@ export const WUBBY_SELECT_COLUMNS = [
  * mensaje de cada conversación. Es el subconjunto exacto que consume la cascada
  * de `resolveMessageBodyAndPreview`: `message` → `media_caption` → emoji por
  * `media_mime_type`, más `format` (tipo cuando no hay mime),
- * `media_storage_path` (distingue "hay media sin caption" de "(vacío)"),
- * `created_at` (etiqueta de hora y orden de la lista), `id` (desempate) y
- * `conversation_id` (clave de emparejamiento).
+ * `media_storage_path` (distingue "hay media sin caption" de "(vacío)") y
+ * `created_at` (etiqueta de hora y orden de la lista).
+ *
+ * Sin `id` ni `conversation_id`: el embed ya viene colgado de su conversación
+ * y el desempate por `id` del `order` no necesita que la columna viaje. Cada
+ * columna de acá se multiplica por cada fila de la bandeja.
  *
  * NO incluye `media_url` ni `message_type`: no existen como columnas en la
  * tabla y sus lectores resuelven a `undefined` de todas formas. `media_filename`
@@ -127,8 +130,6 @@ export const WUBBY_SELECT_COLUMNS = [
  * "📎 Documento"; traerlo por cada conversación de la bandeja no compensa.
  */
 export const WUBBY_PREVIEW_COLUMNS = [
-  "id",
-  "conversation_id",
   "created_at",
   "message",
   "format",

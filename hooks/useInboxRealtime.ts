@@ -12,6 +12,7 @@ import {
   type ConversationDbRow,
 } from "@/lib/conversation-schema";
 import { upsertConversationMessage } from "@/lib/message-upsert";
+import { truncateListPreview } from "@/lib/inbox-preview";
 import { WUBBY_TABLE, type WubbyWhatsappRow } from "@/lib/wubby-schema";
 import {
   type HotelWhatsappByIdMap,
@@ -117,9 +118,6 @@ function sortByActivity(list: Conversation[]): Conversation[] {
   });
 }
 
-function truncatePreview(preview: string): string {
-  return preview.length > 120 ? `${preview.slice(0, 117)}…` : preview;
-}
 
 /** guest_phone (normalizado) + hotel_id del row Wubby vs hotel activo en memoria. */
 function rowMatchesInboxHotel(
@@ -524,7 +522,7 @@ export function useInboxRealtime({
             ...urgentVisualPatch,
             messages: upsertConversationMessage(c.messages, built.message),
             lastMessagePreview: shouldBumpPreview
-              ? truncatePreview(built.previewRaw)
+              ? truncateListPreview(built.previewRaw)
               : c.lastMessagePreview,
             lastMessageAt: shouldBumpPreview ? built.lastMessageLabel : c.lastMessageAt,
             lastActivityIso: shouldBumpPreview ? built.createdAtIso : c.lastActivityIso,
@@ -618,7 +616,7 @@ export function useInboxRealtime({
             ...urgentVisualPatch,
             messages,
             lastMessagePreview: shouldBumpPreview
-              ? truncatePreview(built.previewRaw)
+              ? truncateListPreview(built.previewRaw)
               : c.lastMessagePreview,
             lastMessageAt: shouldBumpPreview ? built.lastMessageLabel : c.lastMessageAt,
             lastActivityIso: shouldBumpPreview ? built.createdAtIso : c.lastActivityIso,

@@ -25,7 +25,12 @@ import { STAFF_CONTACTS_TABLE, normalizeStaffPhone } from "@/lib/staff-contacts"
 import { fetchTicketBadges, markTicketBadges } from "@/lib/inbox-ticket-badges-server";
 import type { Conversation } from "@/lib/inbox-types";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
-import { MESSAGES_LIMIT, POSTGREST_PAGE_SIZE } from "@/lib/message-limits";
+import { MESSAGES_LIMIT } from "@/lib/message-limits";
+import {
+  buildDescKeysetOrFilter,
+  encodeKeysetCursor,
+  parseKeysetCursor,
+} from "@/lib/inbox-keyset";
 import { WUBBY_PREVIEW_COLUMNS, WUBBY_TABLE, type WubbyWhatsappRow } from "@/lib/wubby-schema";
 
 export const dynamic = "force-dynamic";
@@ -37,7 +42,7 @@ export const dynamic = "force-dynamic";
  * Se apoya en el FK `wubby_conversation_id_fkey` y en el índice
  * `idx_wubby_conv_recent (conversation_id, created_at DESC, id DESC)`.
  */
-const CONVERSATIONS_WITH_LAST_MESSAGE_SELECT = `${CONVERSATION_SELECT_COLUMNS}, ${WUBBY_TABLE}(${WUBBY_PREVIEW_COLUMNS})`;
+const CONVERSATIONS_WITH_LAST_MESSAGE_SELECT = `${CONVERSATION_SELECT_COLUMNS}, sort_activity_at, ${WUBBY_TABLE}(${WUBBY_PREVIEW_COLUMNS})`;
 
 /** Fila de `conversations` con el array embebido (0 o 1 elementos). */
 type ConversationRowWithLastMessage = ConversationDbRow & {
@@ -45,22 +50,23 @@ type ConversationRowWithLastMessage = ConversationDbRow & {
 };
 
 /**
- * Tope de conversaciones traídas por actividad. Con ~800 en el hotel más grande
- * y ~26 nuevas por día, la consulta sin acotar cruzaba el tope de página de
- * PostgREST (1000) en unos días y se recortaba EN SILENCIO: 200 OK con la lista
- * incompleta. Este límite es explícito y sabemos exactamente qué deja afuera.
+ * Tamaño de página de la bandeja. La lista pinta ~12 filas por pantalla: 30
+ * llenan la primera vista con margen y el resto llega con scroll infinito por
+ * cursor keyset (`?before=<sort_activity_at>|<id>`).
  *
- * No es una página: no hay cursor ni "cargar más". Lo que cae fuera del tope y
- * fuera del set protegido de abajo NO es alcanzable desde la bandeja, porque la
- * búsqueda del cliente filtra el array ya cargado.
+ * Antes eran 300 fijas sin forma de pedir más: ahora todo el hotel es
+ * alcanzable bajando, y la carga inicial pesa un décimo.
  */
-const CONVERSATIONS_PAGE_SIZE = 300;
+const CONVERSATIONS_PAGE_SIZE = 30;
 
 /**
- * Set protegido: conversaciones que no pueden faltar aunque queden fuera del
- * tope por actividad. A propósito MÁS AMPLIO que el chip "Atención" — acá no se
- * clasifica, se garantiza un superconjunto. Traer de más es barato (~37 filas en
- * el hotel más grande, 97 en el de más carga operativa); perder una no.
+ * Set protegido: conversaciones que tienen que estar en memoria aunque no
+ * caigan en la primera página, porque de ellas cuelgan el chip "Atención", el
+ * "Sin leer" y los distintivos de la fila. Solo se piden en la PRIMERA página;
+ * las siguientes son puro keyset.
+ *
+ * A propósito MÁS AMPLIO que el chip "Atención" — acá no se clasifica, se
+ * garantiza un superconjunto.
  *
  * `request` —no `status`— es la columna donde vive `pending`: el dominio de
  * `status` es open / completed / human_control. `human_control` va aparte porque
@@ -73,6 +79,21 @@ const PROTECTED_CONVERSATIONS_FILTER = [
   "needs_human.eq.true",
   "unread_count.gt.0",
 ].join(",");
+
+/**
+ * Tope del set protegido. Hoy son ~37 filas en el hotel más grande y 97 en el
+ * de más carga operativa: 50, ordenadas por actividad, cubren todas las que
+ * están vivas y dejan afuera la cola larga de pendientes viejos (bloqueados de
+ * hace meses, `needs_human` que nadie cerró). Esas siguen apareciendo al bajar
+ * con el scroll, igual que cualquier otra.
+ *
+ * Mismas columnas que una fila de página (`CONVERSATIONS_WITH_LAST_MESSAGE_SELECT`)
+ * y no un recorte: una protegida SE PINTA como fila (nombre, preview, hora,
+ * semáforo, badges) y es la misma conversación que después puede llegar por
+ * keyset. Si viajara con menos columnas, la fila saldría incompleta en
+ * "Atención" y cambiaría de forma al llegar por la otra vía.
+ */
+const PROTECTED_CONVERSATIONS_LIMIT = 50;
 
 /**
  * RPC de búsqueda por nombre y teléfono. `SECURITY INVOKER` y `STABLE`: pliega
@@ -204,10 +225,21 @@ function emptyInboxResponse(availableHotels: AvailableHotel[] = [], activeHotelI
     // Mismo criterio: sin hotel resuelto no se ofrece enviar plantillas. El
     // servidor las bloquea igual, así que acá el default seguro es no pintarlas.
     templatesEnabled: false,
-    total: 0,
     conversationsPageSize: CONVERSATIONS_PAGE_SIZE,
+    hasMore: false,
+    nextCursor: null,
     query: null,
   });
+}
+
+/** Error de Supabase para el cliente: el detalle crudo solo fuera de producción. */
+function upstreamError(label: string, error: { code?: string; message?: string }) {
+  console.error(`[inbox GET] ${label}`, error.code ?? "sin_code");
+  const isDev = process.env.NODE_ENV !== "production";
+  return NextResponse.json(
+    { error: isDev && error.message ? error.message : "No se pudo cargar la bandeja" },
+    { status: 502 }
+  );
 }
 
 export async function GET(request: Request) {
@@ -301,8 +333,8 @@ export async function GET(request: Request) {
     // A propósito NO aplica `CONVERSATIONS_PAGE_SIZE` ni el set protegido: los
     // dos son heurísticas para decidir QUÉ mostrar cuando no hay criterio, y con
     // un criterio explícito sabotearían la búsqueda — el match podría estar
-    // fuera de las 300 y fuera del set protegido, que es justo el caso que esto
-    // viene a cerrar.
+    // en una página que todavía no se cargó y fuera del set protegido. Tampoco
+    // pagina: devuelve el tope del RPC de una vez.
     if (searchTerm) {
       if (searchTerm.length < SEARCH_MIN_LENGTH) {
         return NextResponse.json({
@@ -315,25 +347,20 @@ export async function GET(request: Request) {
           hotelWhatsappById: hotelWhatsappMapToRecord(hotelWhatsappById),
           engineEnabled,
           templatesEnabled,
-          total: 0,
           conversationsPageSize: CONVERSATIONS_PAGE_SIZE,
+          hasMore: false,
+          nextCursor: null,
           query: searchTerm,
           searchLimit: SEARCH_PAGE_SIZE,
         });
       }
 
-      const [rpcResult, hotelTotalResult, staffPhones, ticketBadges] = await Promise.all([
+      const [rpcResult, staffPhones, ticketBadges] = await Promise.all([
         supabase.rpc(SEARCH_CONVERSATIONS_RPC, {
           p_hotel_id: activeHotelId,
           p_q: searchTerm,
           p_limit: SEARCH_PAGE_SIZE,
         }),
-        // El total del hotel se mantiene con búsqueda activa: `total` significa
-        // lo mismo en los dos caminos y el cliente no tiene que reinterpretarlo.
-        supabase
-          .from(CONVERSATIONS_TABLE)
-          .select("id", { count: "exact", head: true })
-          .eq("hotel_id", activeHotelId),
         // El badge de staff también en resultados de búsqueda: si no, la misma
         // conversación se vería marcada en la bandeja y sin marcar al buscarla.
         fetchActiveStaffPhones(supabase, activeHotelId),
@@ -343,13 +370,7 @@ export async function GET(request: Request) {
       ]);
 
       if (rpcResult.error) {
-        console.error("[inbox GET] search_conversations", rpcResult.error);
-        return NextResponse.json({ error: rpcResult.error.message }, { status: 502 });
-      }
-
-      if (hotelTotalResult.error) {
-        console.error("[inbox GET] total de conversaciones", hotelTotalResult.error);
-        return NextResponse.json({ error: hotelTotalResult.error.message }, { status: 502 });
+        return upstreamError("search_conversations", rpcResult.error);
       }
 
       const matchedIds = ((rpcResult.data ?? []) as ConversationDbRow[]).map((row) =>
@@ -373,8 +394,7 @@ export async function GET(request: Request) {
         );
 
         if (withPreview.error) {
-          console.error("[inbox GET] preview de resultados", withPreview.error);
-          return NextResponse.json({ error: withPreview.error.message }, { status: 502 });
+          return upstreamError("preview de resultados", withPreview.error);
         }
 
         searchRows = (withPreview.data ?? []) as unknown as ConversationRowWithLastMessage[];
@@ -398,8 +418,10 @@ export async function GET(request: Request) {
         hotelWhatsappById: hotelWhatsappMapToRecord(hotelWhatsappById),
         engineEnabled,
         templatesEnabled,
-        total: hotelTotalResult.count ?? convRows.length,
         conversationsPageSize: CONVERSATIONS_PAGE_SIZE,
+        // La búsqueda no pagina: el RPC ya devuelve su tope completo.
+        hasMore: false,
+        nextCursor: null,
         // Eco del término aplicado: el cliente descarta con esto las respuestas
         // que llegan fuera de orden respecto de lo que hay tipeado.
         query: searchTerm,
@@ -407,25 +429,48 @@ export async function GET(request: Request) {
       });
     }
 
-    // Independientes entre sí: ninguna necesita el resultado de otra, así que
-    // van en paralelo y el GET cuesta un round trip, no tres.
-    const [recentResult, protectedResult, totalResult, staffPhones, ticketBadges] = await Promise.all([
-      // A) Las más recientes por actividad. `sort_activity_at` es la columna
-      // generada `coalesce(last_guest_message_at, created_at)`; el orden por
-      // `id` desempata para que el corte sea determinista. Ambos los cubre
-      // `idx_conversations_hotel_activity`.
-      buildInboxConversationsQuery(supabase, activeHotelId)
-        .order("sort_activity_at", { ascending: false })
-        .order("id", { ascending: false })
-        .limit(CONVERSATIONS_PAGE_SIZE),
-      // B) El set protegido, sin límite: son decenas de filas y perder una es
-      // justamente lo que este tope no puede permitirse.
-      buildInboxConversationsQuery(supabase, activeHotelId).or(PROTECTED_CONVERSATIONS_FILTER),
-      // Total real del hotel. `head: true` no trae filas, solo el conteo.
-      supabase
-        .from(CONVERSATIONS_TABLE)
-        .select("id", { count: "exact", head: true })
-        .eq("hotel_id", activeHotelId),
+    // Cursor keyset de "cargar más". Sin `before` es la primera página, la
+    // única que además trae el set protegido. Un cursor que no valida no se
+    // interpola en el filtro: 400.
+    const beforeRaw = searchParams.get("before")?.trim() ?? "";
+    const cursor = beforeRaw ? parseKeysetCursor(beforeRaw) : null;
+    if (beforeRaw && !cursor) {
+      return NextResponse.json({ error: "Cursor de página inválido" }, { status: 400 });
+    }
+    const isFirstPage = cursor === null;
+
+    // A) Página por actividad. `sort_activity_at` es la columna generada
+    // `coalesce(last_guest_message_at, created_at)`; el orden por `id` desempata
+    // para que el corte sea determinista. Ambos los cubre
+    // `idx_conversations_hotel_activity (hotel_id, sort_activity_at desc, id desc)`.
+    // `desc` sin `nullsFirst` explícito = NULLS FIRST, el mismo orden de antes y
+    // el que asume el predicado keyset. Se pide UNA fila de más solo para saber
+    // si hay otra página, sin contar la tabla.
+    let pageQuery = buildInboxConversationsQuery(supabase, activeHotelId);
+    if (cursor) {
+      pageQuery = pageQuery.or(buildDescKeysetOrFilter("sort_activity_at", "id", cursor));
+    }
+    const pageRequest = pageQuery
+      .order("sort_activity_at", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(CONVERSATIONS_PAGE_SIZE + 1);
+
+    // B) Set protegido, solo en la primera página. Mismo orden que A para que,
+    // si pasa el tope, lo que quede afuera sea lo más viejo.
+    const protectedRequest = isFirstPage
+      ? buildInboxConversationsQuery(supabase, activeHotelId)
+          .or(PROTECTED_CONVERSATIONS_FILTER)
+          .order("sort_activity_at", { ascending: false })
+          .order("id", { ascending: false })
+          .limit(PROTECTED_CONVERSATIONS_LIMIT)
+      : null;
+
+    // Independientes entre sí: el GET cuesta un round trip, no cuatro. Sin
+    // `count: exact`: contar la tabla en cada carga era la consulta más cara del
+    // GET y solo alimentaba un denominador.
+    const [pageResult, protectedResult, staffPhones, ticketBadges] = await Promise.all([
+      pageRequest,
+      protectedRequest,
       // Contactos de staff del hotel activo, para el badge de la bandeja.
       fetchActiveStaffPhones(supabase, activeHotelId),
       // Solicitudes de servicio sin resolver, para el badge de la fila. UNA
@@ -433,60 +478,55 @@ export async function GET(request: Request) {
       fetchTicketBadges(supabase, activeHotelId),
     ]);
 
-    if (recentResult.error) {
-      console.error("[inbox GET] conversations", recentResult.error);
-      return NextResponse.json({ error: recentResult.error.message }, { status: 502 });
+    if (pageResult.error) {
+      return upstreamError("conversations", pageResult.error);
+    }
+    if (protectedResult?.error) {
+      return upstreamError("conversations protegidas", protectedResult.error);
     }
 
-    if (protectedResult.error) {
-      console.error("[inbox GET] conversations protegidas", protectedResult.error);
-      return NextResponse.json({ error: protectedResult.error.message }, { status: 502 });
-    }
-
-    if (totalResult.error) {
-      console.error("[inbox GET] total de conversaciones", totalResult.error);
-      return NextResponse.json({ error: totalResult.error.message }, { status: 502 });
-    }
-
-    const recentRows = (recentResult.data ?? []) as unknown as ConversationRowWithLastMessage[];
-    const protectedRows = (protectedResult.data ??
+    const fetchedPageRows = (pageResult.data ?? []) as unknown as ConversationRowWithLastMessage[];
+    const hasMore = fetchedPageRows.length > CONVERSATIONS_PAGE_SIZE;
+    const pageRows = hasMore ? fetchedPageRows.slice(0, CONVERSATIONS_PAGE_SIZE) : fetchedPageRows;
+    const protectedRows = (protectedResult?.data ??
       []) as unknown as ConversationRowWithLastMessage[];
 
-    // Unión por id. El set protegido se solapa casi por completo con las más
-    // recientes (hoy aporta 1 fila nueva en el hotel más grande), así que la
-    // dedup no es una optimización: sin ella la misma conversación entraría dos
-    // veces y `buildInboxConversations` la duplicaría en la bandeja.
+    // El cursor sale de la ÚLTIMA fila de la página keyset, nunca de una
+    // protegida: esas no siguen el orden de la página.
+    const lastPageRow = pageRows.at(-1);
+    const nextCursor =
+      hasMore && lastPageRow
+        ? encodeKeysetCursor(lastPageRow.sort_activity_at ?? null, lastPageRow.id)
+        : null;
+
+    // Unión por id. El set protegido se solapa casi por completo con la
+    // primera página, así que la dedup no es una optimización: sin ella la
+    // misma conversación entraría dos veces y `buildInboxConversations` la
+    // duplicaría en la bandeja.
     const rowById = new Map<string, ConversationRowWithLastMessage>();
-    for (const row of recentRows) rowById.set(String(row.id), row);
+    for (const row of pageRows) rowById.set(String(row.id), row);
     for (const row of protectedRows) {
       const id = String(row.id);
       if (!rowById.has(id)) rowById.set(id, row);
     }
     const rawRows = [...rowById.values()];
 
-    // El warn ya no vigila la consulta principal: con `CONVERSATIONS_PAGE_SIZE`
-    // el recorte es explícito y conocido, y el cliente lo ve comparando
-    // `fetchedConversations` contra `total`. Ahora vigila la ÚNICA consulta que
-    // sigue sin límite propio, la del set protegido.
-    //
-    // SIN gate de NODE_ENV a propósito. El cap no produce error: PostgREST
-    // corta el resultado y responde 200 OK, así que las conversaciones que
-    // faltan no dejan rastro en ningún lado. Este warn es la ÚNICA señal, y el
-    // único entorno donde un hotel podría llegar al tope es producción —
-    // gatearlo fuera de ella lo apagaba justo donde hace falta.
-    //
-    // Va a los logs del servidor (Vercel), no a la consola del navegador, y
-    // emite solo `hotel_id` y conteos: sin nombres de hotel ni datos de huésped.
-    if (protectedRows.length >= POSTGREST_PAGE_SIZE) {
-      console.warn("[inbox GET] conversaciones protegidas en el tope de página de PostgREST", {
+    // Única señal de que el set protegido quedó recortado: el tope no produce
+    // error. Sin gate de NODE_ENV a propósito — solo en producción un hotel
+    // puede llegar ahí —, y sin PII: `hotel_id` y conteos.
+    if (protectedRows.length >= PROTECTED_CONVERSATIONS_LIMIT) {
+      console.warn("[inbox GET] set protegido en el tope", {
         hotelId: activeHotelId,
         fetchedProtected: protectedRows.length,
-        pageSize: POSTGREST_PAGE_SIZE,
+        limit: PROTECTED_CONVERSATIONS_LIMIT,
       });
     }
 
     const { convRows, lastMessageByConversationId } = splitEmbeddedRows(rawRows);
 
+    // `buildInboxConversations` corta el preview a 120 caracteres
+    // (`truncateListPreview`): es lo único del cuerpo del mensaje que sale en
+    // la respuesta.
     const conversations = buildInboxConversations(convRows, lastMessageByConversationId);
     markStaffConversations(conversations, staffPhones);
     markTicketBadges(conversations, ticketBadges);
@@ -505,12 +545,11 @@ export async function GET(request: Request) {
       hotelWhatsappById: hotelWhatsappMapToRecord(hotelWhatsappById),
       engineEnabled,
       templatesEnabled,
-      // Reemplaza a `truncated`, que con el tope sería `true` de forma
-      // permanente y por lo tanto no informaría nada. `total` es el count real
-      // del hotel: con él, `fetchedConversations < total` dice que hay recorte y
-      // además CUÁNTO falta, que es lo que un booleano nunca pudo decir.
-      total: totalResult.count ?? convRows.length,
       conversationsPageSize: CONVERSATIONS_PAGE_SIZE,
+      // `hasMore` + `nextCursor` reemplazan a `total`: el cliente pide la
+      // siguiente página con `?before=<nextCursor>` al llegar al final.
+      hasMore,
+      nextCursor,
       // `null` = esta respuesta NO es de búsqueda. El campo está siempre para
       // que el cliente pueda leerlo sin ramificar por su ausencia.
       query: null,

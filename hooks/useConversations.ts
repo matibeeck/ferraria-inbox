@@ -20,11 +20,11 @@ type InboxResponse = {
   conversations: Conversation[];
   fetchedRows?: number;
   /**
-   * `count(*)` del hotel, no el largo de `conversations`: desde que
-   * `GET /api/inbox` acota a las más recientes por actividad, el array recibido
-   * es un subconjunto. Es el denominador honesto de "COLA OPERATIVA".
+   * Hay otra página por keyset. La bandeja llega de a 30 (más el set protegido
+   * en la primera) y el resto se pide con `?before=<nextCursor>` al bajar.
    */
-  total?: number;
+  hasMore?: boolean;
+  nextCursor?: string | null;
   availableHotels?: AvailableHotel[];
   activeHotelId?: string | null;
   hotelWhatsappById?: Record<string, string>;
@@ -48,8 +48,32 @@ function sortByLastActivity(list: Conversation[]): Conversation[] {
   });
 }
 
+/**
+ * Nunca pisar el hilo abierto "hacia abajo": `/api/inbox` trae la conversación
+ * sin mensajes. Se conserva lo que hay en memoria cuando ya es autoritativo
+ * (`messagesLoaded`) o cuando tiene al menos tantos mensajes como los que
+ * llegan; así no se pierden ni el historial cargado ni los parches de Realtime
+ * / los envíos optimistas.
+ */
+function keepOpenThread(incoming: Conversation, prevActive: Conversation | undefined): Conversation {
+  if (!prevActive) return incoming;
+  const keepLocal =
+    prevActive.messagesLoaded || prevActive.messages.length >= incoming.messages.length;
+  if (!keepLocal) return incoming;
+  return {
+    ...incoming,
+    messages: prevActive.messages,
+    messagesLoaded: prevActive.messagesLoaded,
+  };
+}
+
 export type RefetchOptions = {
-  /** Si es true, no muestra el estado global de carga ni vacía la lista en error (ideal para reconciliación). */
+  /**
+   * Si es true, no muestra el estado global de carga ni vacía la lista en error
+   * (ideal para reconciliación). Además pide SOLO la primera página y la
+   * MEZCLA por id sobre lo que ya hay: las páginas que la recepcionista ya bajó
+   * no se pierden por un refresco.
+   */
   silent?: boolean;
   /** Señal para abortar el fetch en vuelo (p. ej. cuando un cambio de hotel recrea `load`). */
   signal?: AbortSignal;
@@ -102,11 +126,21 @@ export function useConversations(options?: UseConversationsOptions) {
   const activeHotelId = options?.activeHotelId ?? null;
   const [conversations, setConversations] = useState<Conversation[]>([]);
   /**
-   * Total de conversaciones del hotel según el servidor. `null` = todavía no
-   * llegó ninguna respuesta con el dato; el consumidor decide el fallback en vez
-   * de comerse un 0 que se leería como "el hotel no tiene ninguna".
+   * Scroll infinito. `hasMore` = el servidor dijo que hay otra página por
+   * keyset; el cursor de la última fila recorrida vive en un ref porque solo lo
+   * lee `loadMore` y no debe re-renderizar nada.
    */
-  const [total, setTotal] = useState<number | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const nextCursorRef = useRef<string | null>(null);
+  const loadingMoreRef = useRef(false);
+  /**
+   * Sube en cada carga NO silenciosa (montaje, cambio de hotel). Una página de
+   * `loadMore` que vuelve con otra generación es del hotel anterior y se tira.
+   */
+  const listGenerationRef = useRef(0);
+  /** Hotel de la lista que está en memoria, según la última respuesta aplicada. */
+  const resolvedHotelIdRef = useRef<string | null>(null);
   const [availableHotels, setAvailableHotels] = useState<AvailableHotel[]>([]);
   const [resolvedActiveHotelId, setResolvedActiveHotelId] = useState<string | null>(null);
   const [hotelWhatsappById, setHotelWhatsappById] = useState<HotelWhatsappByIdMap>(() => new Map());
@@ -177,6 +211,8 @@ export function useConversations(options?: UseConversationsOptions) {
     if (!silent) {
       setLoading(true);
       setError(null);
+      // Lista nueva desde cero: cualquier "cargar más" en vuelo queda obsoleto.
+      listGenerationRef.current += 1;
     }
     try {
       // Hace un GET a /api/inbox. `useStoredHotelId=false` fuerza la petición sin
@@ -209,32 +245,40 @@ export function useConversations(options?: UseConversationsOptions) {
       if (!res.ok) {
         throw new Error(json.error ?? "No se pudo cargar la bandeja");
       }
-      const sorted = sortByLastActivity(json.conversations ?? []);
+      const incoming = json.conversations ?? [];
       const activeId = activeConversationIdRef.current?.trim();
+      const incomingCursor = typeof json.nextCursor === "string" ? json.nextCursor : null;
+      const incomingHasMore = json.hasMore === true && incomingCursor !== null;
+      // Mezclar solo si la respuesta es del MISMO hotel que ya está en
+      // pantalla. El reintento por 403 de arriba puede caer en otro hotel, y
+      // mezclar ahí dejaría conversaciones de dos hoteles en la misma lista.
+      const respondedHotelId = json.activeHotelId ?? null;
+      const sameHotel = respondedHotelId === resolvedHotelIdRef.current;
+      resolvedHotelIdRef.current = respondedHotelId;
+      const replaceAll = !silent || !sameHotel;
+      if (silent && !sameHotel) listGenerationRef.current += 1;
+      // Silencioso con páginas ya recorridas: la primera página se MEZCLA y el
+      // cursor sigue donde estaba. Keyset es estable ante inserciones arriba,
+      // así que el cursor viejo sigue apuntando al mismo lugar de la lista.
+      const mergeIntoCurrent = !replaceAll && nextCursorRef.current !== null;
+
       setConversations((prev) => {
-        if (!activeId) return sorted;
-        const prevActive = prev.find((c) => c.id === activeId);
-        if (!prevActive) return sorted;
-        return sorted.map((c) => {
-          if (c.id !== activeId) return c;
-          // Nunca pisar el hilo abierto "hacia abajo": `/api/inbox` trae un array
-          // provisional recortado. Se conserva lo que hay en memoria cuando ya es
-          // autoritativo (`messagesLoaded`) o cuando tiene al menos tantos
-          // mensajes como los que llegan; así no se pierden ni el historial
-          // completo ni los parches de Realtime / los envíos optimistas.
-          const keepLocal =
-            prevActive.messagesLoaded || prevActive.messages.length >= c.messages.length;
-          if (!keepLocal) return c;
-          return {
-            ...c,
-            messages: prevActive.messages,
-            messagesLoaded: prevActive.messagesLoaded,
-          };
-        });
+        const prevActive = activeId ? prev.find((c) => c.id === activeId) : undefined;
+        const fresh = incoming.map((c) =>
+          c.id === activeId ? keepOpenThread(c, prevActive) : c
+        );
+        if (replaceAll) return sortByLastActivity(fresh);
+
+        // Todo lo que ya estaba y no vino en esta primera página se queda:
+        // páginas bajadas con el scroll y resultados inyectados por la búsqueda.
+        // Realtime los mantiene al día igual que antes.
+        const freshIds = new Set(fresh.map((c) => c.id));
+        return sortByLastActivity([...fresh, ...prev.filter((c) => !freshIds.has(c.id))]);
       });
-      // Solo si vino un número: ante una respuesta vieja o un campo ausente se
-      // conserva el último total conocido en vez de degradar el denominador.
-      if (typeof json.total === "number") setTotal(json.total);
+      if (!mergeIntoCurrent) {
+        nextCursorRef.current = incomingHasMore ? incomingCursor : null;
+        setHasMore(incomingHasMore);
+      }
       setAvailableHotels(json.availableHotels ?? []);
       setResolvedActiveHotelId(json.activeHotelId ?? null);
       setHotelWhatsappById(hotelWhatsappMapFromRecord(json.hotelWhatsappById ?? {}));
@@ -254,6 +298,8 @@ export function useConversations(options?: UseConversationsOptions) {
       if (!silent) {
         setError(e instanceof Error ? e.message : "Error de red");
         setConversations([]);
+        nextCursorRef.current = null;
+        setHasMore(false);
       } else {
         console.warn("[useConversations] Refresco silencioso falló", e);
       }
@@ -272,6 +318,61 @@ export function useConversations(options?: UseConversationsOptions) {
 
   const loadRef = useRef(load);
   loadRef.current = load;
+
+  /**
+   * Siguiente página por keyset, anexada por id al final de lo que hay. La
+   * dispara el scroll de la lista al llegar abajo.
+   *
+   * Lo que ya está en memoria GANA sobre lo que trae la página: puede tener
+   * mensajes cargados o parches de Realtime más nuevos que la foto del GET.
+   * Solo entran las filas que faltaban (p. ej. una protegida que ya había
+   * llegado en la primera carga no se duplica ni se pisa).
+   *
+   * Nunca vacía la lista ni muestra error de pantalla: si falla, `hasMore`
+   * queda como estaba y el próximo scroll reintenta.
+   */
+  const loadMore = useCallback(async () => {
+    const cursor = nextCursorRef.current;
+    if (!cursor || loadingMoreRef.current) return;
+    const generation = listGenerationRef.current;
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    try {
+      const params = new URLSearchParams({ before: cursor });
+      if (activeHotelId) params.set("hotelId", activeHotelId);
+      const res = await fetch(`/api/inbox?${params.toString()}`, { cache: "no-store" });
+      const json = (await res.json()) as InboxResponse;
+      if (!res.ok) throw new Error(json.error ?? "No se pudo cargar más conversaciones");
+      // Cambió el hotel (o se recargó la lista desde cero) mientras volvía.
+      if (generation !== listGenerationRef.current) return;
+      // Otro `loadMore` ya avanzó el cursor: esta página es vieja.
+      if (nextCursorRef.current !== cursor) return;
+
+      const page = json.conversations ?? [];
+      setConversations((prev) => {
+        const known = new Set(prev.map((c) => c.id));
+        const added = page.filter((c) => !known.has(c.id));
+        if (added.length === 0) return prev;
+        return sortByLastActivity([...prev, ...added]);
+      });
+      const cursorOut = typeof json.nextCursor === "string" ? json.nextCursor : null;
+      const more = json.hasMore === true && cursorOut !== null;
+      nextCursorRef.current = more ? cursorOut : null;
+      setHasMore(more);
+    } catch (e) {
+      console.warn("[useConversations] No se pudo cargar la página siguiente", e);
+    } finally {
+      loadingMoreRef.current = false;
+      if (generation === listGenerationRef.current) setLoadingMore(false);
+    }
+  }, [activeHotelId]);
+
+  // Cambio de hotel: la carga no silenciosa ya subió la generación; acá se
+  // apaga el spinner de una página del hotel anterior que quedó en vuelo.
+  useEffect(() => {
+    loadingMoreRef.current = false;
+    setLoadingMore(false);
+  }, [activeHotelId]);
 
   // Debounce trailing-edge SOLO para el camino de reconciliación Realtime
   // (`onMissingContext`): si llegan varios eventos sin contexto en una ventana
@@ -419,7 +520,9 @@ export function useConversations(options?: UseConversationsOptions) {
   return {
     conversations,
     setConversations,
-    total,
+    hasMore,
+    loadingMore,
+    loadMore,
     loading,
     error,
     refetch: load,
