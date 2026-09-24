@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useReservasCount } from "@/app/reservas/hooks/useReservasCount";
 import { useSolicitudesCount } from "@/app/solicitudes/hooks/useSolicitudesCount";
@@ -9,7 +9,7 @@ import { useCapabilities } from "@/hooks/useCapabilities";
 import type { RealtimeUiStatus } from "@/hooks/useInboxRealtime";
 import { usePushNotifications, type PushStatus } from "@/hooks/usePushNotifications";
 import { initials } from "@/lib/avatar";
-import { INBOX_PATH, RESERVAS_PATH, SOLICITUDES_PATH } from "@/lib/routes";
+import { INBOX_PATH, RESERVAS_PATH, SOLICITUDES_PATH, landingPathFor } from "@/lib/routes";
 import { createClient } from "@/lib/supabase/client";
 import { BrandHeaderMark } from "./BrandHeaderMark";
 import { ChangelogPanel, SparkMark, useChangelog } from "./ChangelogModal";
@@ -240,7 +240,26 @@ export function AppSidebar({
   realtimeStatus,
 }: AppSidebarProps) {
   const pathname = usePathname();
+  const router = useRouter();
   const capabilities = useCapabilities();
+
+  // Rebote por rol: un `operativo` que cae en la bandeja o en Reservas se va a
+  // su pantalla. Antes lo hacía el middleware con una consulta a `hotel_users`
+  // en cada navegación; acá reusa las capacidades que el sidebar ya pide a
+  // `/api/me`, sin viajes extra. El sidebar vive en las tres pantallas.
+  //
+  // Falla abierto: con `capabilities === null` (cargando o `/api/me` caído) no
+  // se redirige a nadie. Es UX, no seguridad: cada endpoint tiene su propio
+  // gate de capacidad y un operativo nunca recibe datos de huéspedes.
+  useEffect(() => {
+    if (!capabilities) return;
+    const rutaProhibida =
+      (pathname === INBOX_PATH && !capabilities.verConversacionesHuespedes) ||
+      (pathname.startsWith(RESERVAS_PATH) && !capabilities.verReservas);
+    if (rutaProhibida) {
+      router.replace(landingPathFor(capabilities));
+    }
+  }, [capabilities, pathname, router]);
   const reservasCount = useReservasCount(hotelId);
   const solicitudesCount = useSolicitudesCount(hotelId);
   const online = useSyncExternalStore(subscribeOnline, readOnline, () => true);

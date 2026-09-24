@@ -1,14 +1,20 @@
 import { createServerClient } from "@supabase/ssr";
-import type { SupabaseClient } from "@supabase/supabase-js";
+import type { Session, SupabaseClient, User } from "@supabase/supabase-js";
 import { NextResponse, type NextRequest } from "next/server";
 
-import { capabilitiesForRoles } from "@/lib/permissions";
-import { INBOX_PATH, LOGIN_PATH, RESERVAS_PATH, landingPathFor } from "@/lib/routes";
+import { INBOX_PATH, LOGIN_PATH } from "@/lib/routes";
 import { cookieDomainOption } from "./cookie-domain";
 
-const GET_USER_TIMEOUT_MS = 8_000;
-/** Más corto que el de getUser: es un SELECT de una fila, no una llamada a Auth. */
-const ROLE_QUERY_TIMEOUT_MS = 3_000;
+/** Tope para cualquier llamada a Auth desde el middleware (refresh o getUser). */
+const AUTH_TIMEOUT_MS = 8_000;
+
+/**
+ * Por debajo de este margen el access token se considera "por vencer" y se
+ * valida contra Auth con `getUser()`. `getSession()` ya refresca solo cuando
+ * quedan menos de 90 s (margen interno de supabase-js), así que en la práctica
+ * este camino queda para un refresh que devolvió un token casi vencido.
+ */
+const MIN_TOKEN_LIFETIME_MS = 60_000;
 
 function copyCookies(from: NextResponse, to: NextResponse) {
   from.cookies.getAll().forEach(({ name, value, ...opts }) => {
@@ -16,18 +22,47 @@ function copyCookies(from: NextResponse, to: NextResponse) {
   });
 }
 
+function withTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error(`${label} timeout`)), AUTH_TIMEOUT_MS);
+    }),
+  ]);
+}
+
+/**
+ * Sesión leída de la cookie, SIN verificarla contra el servidor.
+ *
+ * Con el access token vigente `getSession()` solo decodifica la cookie: cero
+ * viajes de red. Si al token le quedan menos de 90 s, supabase-js lo refresca
+ * con el refresh token (un viaje a Auth) y reescribe las cookies vía `setAll`.
+ *
+ * No se lee `session.user`: sin verificar no es confiable, y en servidor
+ * supabase-js avisa por consola si se toca. Acá solo importa si hay sesión.
+ */
+async function getSessionOrNull(supabase: SupabaseClient): Promise<Session | null> {
+  try {
+    const { data, error } = await withTimeout(supabase.auth.getSession(), "getSession");
+    if (error) {
+      console.warn("[middleware] getSession error:", error.message);
+      return null;
+    }
+    return data.session;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn("[middleware] getSession no disponible (timeout o error):", msg);
+    return null;
+  }
+}
+
 /**
  * getUser() llama a la API de Auth; en Edge puede colgarse (red/DNS) y dejar
  * la app sin responder. Evitamos eso con un timeout explícito.
  */
-async function getUserOrNull(supabase: SupabaseClient) {
+async function getUserOrNull(supabase: SupabaseClient): Promise<User | null> {
   try {
-    const { data, error } = await Promise.race([
-      supabase.auth.getUser(),
-      new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error("getUser timeout")), GET_USER_TIMEOUT_MS);
-      }),
-    ]);
+    const { data, error } = await withTimeout(supabase.auth.getUser(), "getUser");
     if (error) {
       console.warn("[middleware] getUser error:", error.message);
       return null;
@@ -41,61 +76,39 @@ async function getUserOrNull(supabase: SupabaseClient) {
 }
 
 /**
- * Capacidades del usuario leyendo `hotel_users` con la anon key + su JWT.
+ * ¿Hay sesión utilizable?
  *
- * Funciona porque la policy `hotel_users_self_select` deja leer la propia fila;
- * no hace falta service_role en el Edge (y no debería andar acá).
+ * - Access token vigente (>= 60 s): sí, sin ningún viaje a la base ni a Auth.
+ * - Por vencer o vencido con refresh token: `getSession()` ya intentó el
+ *   refresh; si igual quedó corto, `getUser()` lo valida contra Auth.
+ * - Sin cookie o refresh fallido: no.
  *
- * FALLA ABIERTO A PROPÓSITO. Si la consulta se cuelga o revienta devuelve
- * `null` y el middleware no redirige a nadie. El razonamiento: este redirect es
- * UX, no seguridad — el candado real son el gate de capacidad de cada endpoint
- * y la RLS. Fallar cerrado ante un hipo de red dejaría a una recepcionista sin
- * poder abrir la bandeja con un huésped esperando, que es el peor resultado
- * posible; fallar abierto, en cambio, le muestra a un operativo una pantalla
- * cuyos datos igual no puede cargar.
+ * Esto es UX, no seguridad: un token falsificado pasaría este filtro, pero cada
+ * Route Handler vuelve a verificar con `getUser()` y responde 401/403. El
+ * candado real vive ahí.
  */
-async function capabilitiesOrNull(supabase: SupabaseClient, userId: string) {
-  try {
-    const { data, error } = await Promise.race([
-      supabase.from("hotel_users").select("role").eq("user_id", userId),
-      new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error("hotel_users timeout")), ROLE_QUERY_TIMEOUT_MS);
-      }),
-    ]);
-    if (error) {
-      console.warn("[middleware] hotel_users error:", error.message);
-      return null;
-    }
-    return capabilitiesForRoles((data ?? []).map((row) => row.role));
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    console.warn("[middleware] rol no disponible (timeout o error):", msg);
-    return null;
-  }
+async function hasUsableSession(supabase: SupabaseClient): Promise<boolean> {
+  const session = await getSessionOrNull(supabase);
+  if (!session?.access_token) return false;
+
+  const expiresAtMs = session.expires_at != null ? session.expires_at * 1000 : 0;
+  if (expiresAtMs - Date.now() >= MIN_TOKEN_LIFETIME_MS) return true;
+
+  if (!session.refresh_token) return false;
+  return (await getUserOrNull(supabase)) != null;
 }
 
 /**
- * ¿Esta ruta necesita conocer el rol?
- *
- * Solo las pantallas gateadas. El matcher del middleware cubre casi todo, así
- * que consultar el rol siempre significaría un viaje extra a la base en CADA
- * navegación y cada petición a `/api/*`. Los endpoints ya traen su propio gate,
- * así que acá alcanza con las rutas donde el usuario puede aterrizar.
- */
-function needsRoleCheck(pathname: string): boolean {
-  return (
-    pathname === INBOX_PATH ||
-    pathname === LOGIN_PATH ||
-    pathname === RESERVAS_PATH ||
-    pathname.startsWith(`${RESERVAS_PATH}/`)
-  );
-}
-
-/**
- * Refresca la sesión de Supabase y aplica reglas de acceso:
+ * Mantiene la sesión de Supabase y aplica reglas de acceso:
  * - Sin sesión: /api/* → 401; resto → /login
- * - Con sesión en /login → su pantalla de aterrizaje según el rol
- * - Con sesión en una ruta que su rol no cubre → rebote a su aterrizaje
+ * - Con sesión en /login → la bandeja
+ *
+ * El rebote por ROL (un `operativo` que cae en la bandeja o en Reservas) ya no
+ * vive acá: costaba una consulta a `hotel_users` por navegación. Lo hace el
+ * sidebar en el cliente con las capacidades que ya carga de `/api/me` (ver
+ * `AppSidebar`). Sigue fallando abierto: si `/api/me` falla, no se redirige a
+ * nadie, y el operativo ve una pantalla cuyos datos igual no puede cargar
+ * porque cada endpoint tiene su gate de capacidad.
  */
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
@@ -124,36 +137,24 @@ export async function updateSession(request: NextRequest) {
     },
   });
 
-  const user = await getUserOrNull(supabase);
+  const authenticated = await hasUsableSession(supabase);
 
   const pathname = request.nextUrl.pathname;
 
-  if (user && needsRoleCheck(pathname)) {
-    const capabilities = await capabilitiesOrNull(supabase, user.id);
-
-    // `capabilities === null` = la consulta falló: no redirigimos (falla abierto).
-    const destino = capabilities ? landingPathFor(capabilities) : INBOX_PATH;
-
-    const rutaProhibida =
-      capabilities != null &&
-      ((pathname === INBOX_PATH && !capabilities.verConversacionesHuespedes) ||
-        (pathname.startsWith(RESERVAS_PATH) && !capabilities.verReservas));
-
-    if (pathname === LOGIN_PATH || rutaProhibida) {
-      const redirect = NextResponse.redirect(new URL(destino, request.url));
-      copyCookies(supabaseResponse, redirect);
-      return redirect;
-    }
+  if (authenticated && pathname === LOGIN_PATH) {
+    const redirect = NextResponse.redirect(new URL(INBOX_PATH, request.url));
+    copyCookies(supabaseResponse, redirect);
+    return redirect;
   }
 
-  if (!user) {
+  if (!authenticated) {
     if (pathname.startsWith("/api")) {
       const unauthorized = NextResponse.json({ error: "No autorizado" }, { status: 401 });
       copyCookies(supabaseResponse, unauthorized);
       return unauthorized;
     }
-    if (pathname !== "/login") {
-      const loginUrl = new URL("/login", request.url);
+    if (pathname !== LOGIN_PATH) {
+      const loginUrl = new URL(LOGIN_PATH, request.url);
       loginUrl.searchParams.set("next", pathname);
       const redirect = NextResponse.redirect(loginUrl);
       copyCookies(supabaseResponse, redirect);
