@@ -9,6 +9,7 @@ import {
   type SetStateAction,
 } from "react";
 import { getMessageDisplayMs } from "@/lib/chat-utils";
+import { seedSignedUrlsFromMessages } from "@/lib/signed-media-cache";
 import type { Conversation, Message, MessageDeliveryReceipt } from "@/lib/inbox-types";
 
 type MessagesResponse = {
@@ -142,6 +143,9 @@ export function useInboxConversationMessages(
         if (controller.signal.aborted || fetchKeyRef.current !== key) return;
 
         const messages = json.messages ?? [];
+        // Antes de pintar: así las burbujas arrancan con la URL ya firmada y
+        // ninguna imagen pide su propia firma al servidor.
+        seedSignedUrlsFromMessages(messages);
         const olderCursor =
           json.hasOlder === true && typeof json.olderCursor === "string" ? json.olderCursor : null;
         setConversations((prev) =>
@@ -193,6 +197,7 @@ export function useInboxConversationMessages(
         if (fetchKeyRef.current !== key) return;
 
         const older = json.messages ?? [];
+        seedSignedUrlsFromMessages(older);
         const nextCursor =
           json.hasOlder === true && typeof json.olderCursor === "string" ? json.olderCursor : null;
         setConversations((prev) =>

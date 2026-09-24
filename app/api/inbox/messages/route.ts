@@ -5,6 +5,12 @@ import { fetchConversationMessagePage } from "@/lib/inbox-fetch-messages";
 import { parseKeysetCursor } from "@/lib/inbox-keyset";
 import { fetchReceiptsForWamids, uniqueWamids } from "@/lib/message-statuses-server";
 import {
+  defaultMediaBucket,
+  groupStoragePathsByBucket,
+  signedMediaKey,
+} from "@/lib/media-signing";
+import { signStoragePathsByBucket } from "@/lib/media-signing-server";
+import {
   buildHotelWhatsappByIdMap,
   resolveHotelWaIdentitiesForRow,
 } from "@/lib/hotel-whatsapp-map";
@@ -115,17 +121,37 @@ export async function GET(request: Request) {
       limit: MESSAGES_PAGE_SIZE,
     });
 
-    // Acuses de Meta SOLO de los wamids de esta página: dependen de las filas
-    // que acaban de llegar, que ya vienen filtradas por hotel y conversación.
-    // Antes eran un request aparte con tres consultas en serie.
-    const statuses = await fetchReceiptsForWamids(
-      supabase,
-      uniqueWamids(page.rows.map((row) => row.wamid))
-    );
-
-    const messages: Message[] = page.rows.map((row) => {
+    const built: Message[] = page.rows.map((row) => {
       const identities = resolveHotelWaIdentitiesForRow(row, hotelWhatsappById);
       return buildMessageFromWubbyRow(row, guestPhone, identities).message;
+    });
+
+    // Media de la página, agrupada por bucket. Las paths salen de filas que ya
+    // pasaron el candado de hotel + conversación de arriba: firmarlas acá es
+    // tan seguro como el lookup por path del endpoint unitario, sin su viaje.
+    const fallbackBucket = defaultMediaBucket();
+    const mediaGroups = groupStoragePathsByBucket(
+      built
+        .filter((m) => m.mediaStoragePath && !m.mediaUrl)
+        .map((m) => ({ path: m.mediaStoragePath, bucket: m.mediaBucket })),
+      fallbackBucket
+    );
+
+    // Las dos dependen de la página y no entre sí: en paralelo.
+    // - Acuses de Meta SOLO de los wamids de esta página (antes: un request
+    //   aparte con tres consultas en serie).
+    // - Firma en lote: un `createSignedUrls` por bucket (antes: un GET por
+    //   imagen, cada uno con su lookup de hotel por path).
+    const [statuses, signed] = await Promise.all([
+      fetchReceiptsForWamids(supabase, uniqueWamids(page.rows.map((row) => row.wamid))),
+      signStoragePathsByBucket(supabase, mediaGroups),
+    ]);
+
+    const messages: Message[] = built.map((m) => {
+      if (!m.mediaStoragePath || m.mediaUrl) return m;
+      const bucket = m.mediaBucket?.trim() || fallbackBucket;
+      const hit = signed.get(signedMediaKey(bucket, m.mediaStoragePath.trim()));
+      return hit ? { ...m, mediaSignedUrl: hit.url, mediaSignedExpiresAt: hit.expiresAt } : m;
     });
 
     return NextResponse.json({

@@ -59,6 +59,7 @@ import {
   parseWhatsappInstant,
 } from "@/lib/meta-window";
 import { collectPendingReceiptWamids, resolveDeliveryTick } from "@/lib/delivery-status";
+import { readCachedSignedUrl, writeCachedSignedUrl } from "@/lib/signed-media-cache";
 import { STAFF_CONTACT_TEMPLATE_NAME } from "@/lib/staff-contacts";
 import { sendWhatsappTemplate } from "@/lib/send-whatsapp-template";
 import { tiempoTranscurrido } from "@/lib/service-tickets";
@@ -811,25 +812,17 @@ function shouldAutoLoadMedia(message: Message): boolean {
 }
 
 /**
- * Caché en memoria de signed URLs, compartida entre todas las instancias de
- * `useLazySignedMediaUrl`, indexada por `storagePath`. Evita re-pedir al endpoint
- * una URL ya firmada y vigente al re-seleccionar conversaciones dentro de la misma
- * sesión. Vive solo en memoria de la página (se pierde al refrescar).
+ * URL firmada de la media del mensaje. Primero la caché del navegador —que
+ * siembra `GET /api/inbox/messages` con la firma en lote de cada página— y solo
+ * si falta o venció, `/api/media/signed-url` (lookup de hotel por path + firma).
  */
-const signedUrlCache = new Map<string, { url: string; expiresAt: number }>();
-/** TTL cliente conservador: el server firma a 1h; cacheamos ~55 min para nunca servir una URL a punto de expirar. */
-const SIGNED_URL_CLIENT_TTL_MS = 55 * 60 * 1000;
-
 async function fetchSignedMediaUrl(message: Message, signal?: AbortSignal): Promise<string> {
   if (!message.mediaStoragePath) {
     throw new Error("missing storage path");
   }
 
-  const cacheKey = message.mediaStoragePath;
-  const cached = signedUrlCache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) {
-    return cached.url;
-  }
+  const cached = readCachedSignedUrl(message.mediaStoragePath);
+  if (cached) return cached;
 
   const params = new URLSearchParams();
   params.set("path", message.mediaStoragePath);
@@ -845,24 +838,32 @@ async function fetchSignedMediaUrl(message: Message, signal?: AbortSignal): Prom
     throw new Error("signed-url vacío");
   }
 
-  signedUrlCache.set(cacheKey, {
-    url: payload.signedUrl,
-    expiresAt: Date.now() + SIGNED_URL_CLIENT_TTL_MS,
-  });
-
+  writeCachedSignedUrl(message.mediaStoragePath, payload.signedUrl);
   return payload.signedUrl;
 }
 
 type MediaLoadPhase = "deferred" | "loading" | "loaded" | "error";
 
+/**
+ * La media de más de 24 h sigue esperando el clic ("deferred") aunque ya
+ * venga firmada: la firma es barata, pero bajar la imagen no. Lo que cambia es
+ * que el clic usa la URL de la caché sin volver al servidor.
+ */
 function resolveInitialMediaPhase(message: Message): MediaLoadPhase {
   if (message.mediaUrl) return "loaded";
   if (!message.mediaStoragePath) return "error";
-  return shouldAutoLoadMedia(message) ? "loading" : "deferred";
+  if (!shouldAutoLoadMedia(message)) return "deferred";
+  return readCachedSignedUrl(message.mediaStoragePath) ? "loaded" : "loading";
+}
+
+function initialSignedUrl(message: Message): string | null {
+  if (message.mediaUrl) return message.mediaUrl;
+  if (!shouldAutoLoadMedia(message)) return null;
+  return readCachedSignedUrl(message.mediaStoragePath);
 }
 
 function useLazySignedMediaUrl(message: Message) {
-  const [signedUrl, setSignedUrl] = useState<string | null>(message.mediaUrl ?? null);
+  const [signedUrl, setSignedUrl] = useState<string | null>(() => initialSignedUrl(message));
   const [phase, setPhase] = useState<MediaLoadPhase>(() => resolveInitialMediaPhase(message));
   const abortRef = useRef<AbortController | null>(null);
 
@@ -1143,6 +1144,8 @@ function PrivateWhatsAppImage({
       <img
         src={signedUrl}
         alt={alt}
+        loading="lazy"
+        decoding="async"
         title="Abrir imagen"
         onClick={() => setIsOpen(true)}
         onError={() => setImgFailed(true)}

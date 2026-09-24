@@ -3,12 +3,19 @@ import { requireSessionUser } from "@/lib/auth/require-user";
 import { requireCapability } from "@/lib/auth/require-capability";
 import { assertStoragePathInHotel } from "@/lib/auth/require-hotel";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
+import {
+  SIGNED_URL_TTL_SECONDS,
+  VALID_BUCKET_RE,
+  defaultMediaBucket,
+} from "@/lib/media-signing";
 
 export const dynamic = "force-dynamic";
 
-const SIGNED_URL_TTL_SECONDS = 3600;
-const VALID_BUCKET_RE = /^[A-Za-z0-9_-]+$/;
-
+/**
+ * Respaldo de firma UNITARIA. La media de cada página del hilo ya llega
+ * firmada en lote desde `GET /api/inbox/messages`; esto solo corre cuando una
+ * URL venció en la caché del navegador o no vino (mensajes por Realtime).
+ */
 export async function GET(request: Request) {
   const auth = await requireSessionUser();
   if (auth.response) return auth.response;
@@ -25,11 +32,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "bucket inválido" }, { status: 400 });
   }
 
-  const bucket =
-    bucketParam ||
-    process.env.WHATSAPP_MEDIA_BUCKET ||
-    process.env.NEXT_PUBLIC_WHATSAPP_MEDIA_BUCKET ||
-    "hotel-media";
+  const bucket = bucketParam || defaultMediaBucket();
 
   try {
     const supabase = getSupabaseServerClient();
@@ -47,12 +50,18 @@ export async function GET(request: Request) {
       .createSignedUrl(path, SIGNED_URL_TTL_SECONDS);
 
     if (error) {
-      return NextResponse.json({ error: error.message }, { status: 502 });
+      return NextResponse.json(
+        { error: process.env.NODE_ENV !== "production" ? error.message : "No se pudo firmar el archivo" },
+        { status: 502 }
+      );
     }
 
     return NextResponse.json({ signedUrl: data.signedUrl });
   } catch (e) {
     const message = e instanceof Error ? e.message : "Error desconocido";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json(
+      { error: process.env.NODE_ENV !== "production" ? message : "Error desconocido" },
+      { status: 500 }
+    );
   }
 }

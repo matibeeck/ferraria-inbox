@@ -102,6 +102,15 @@ export interface Message {
   mediaCaption?: string | null;
   mediaFilename?: string | null;
   mediaBucket?: string | null;
+  /**
+   * URL firmada de `mediaStoragePath`, ya resuelta por
+   * `GET /api/inbox/messages` para toda la media de la página (1 h de vida).
+   * El cliente la usa para sembrar su caché; si falta o venció, cae a
+   * `/api/media/signed-url`. Ausente en mensajes que llegan por Realtime.
+   */
+  mediaSignedUrl?: string | null;
+  /** ISO en que vence `mediaSignedUrl`, según el reloj del servidor. */
+  mediaSignedExpiresAt?: string | null;
   metaMediaId?: string | null;
   /**
    * Columna `wamid`: id de Meta del mensaje, clave contra la que resuelven las
