@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { buildMessageFromWubbyRow, normalizeWaIdentity } from "@/lib/chat-utils";
-import { CONVERSATIONS_TABLE, type ConversationDbRow } from "@/lib/conversation-schema";
-import { fetchWubbyRowsForGuestAtHotel } from "@/lib/inbox-fetch-messages";
+import { CONVERSATIONS_TABLE } from "@/lib/conversation-schema";
+import { fetchConversationMessagePage } from "@/lib/inbox-fetch-messages";
+import { parseKeysetCursor } from "@/lib/inbox-keyset";
 import {
   buildHotelWhatsappByIdMap,
   resolveHotelWaIdentitiesForRow,
@@ -14,6 +15,16 @@ import { getSupabaseServerClient } from "@/lib/supabase-server";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * Mensajes por página. Una pantalla de hilo muestra ~15 burbujas: 50 dan
+ * contexto de sobra al abrir y el resto se pide con "Cargar anteriores"
+ * (`?before=<created_at>|<id>`). Antes se traía el hilo COMPLETO en páginas
+ * seriales de hasta 15.000 filas.
+ */
+const MESSAGES_PAGE_SIZE = 50;
+
+const isDev = process.env.NODE_ENV !== "production";
+
 export async function GET(request: Request) {
   try {
     const auth = await requireSessionUser();
@@ -25,6 +36,12 @@ export async function GET(request: Request) {
 
     if (!conversationId) {
       return NextResponse.json({ error: "conversationId es obligatorio" }, { status: 400 });
+    }
+
+    const beforeRaw = url.searchParams.get("before")?.trim() ?? "";
+    const cursor = beforeRaw ? parseKeysetCursor(beforeRaw) : null;
+    if (beforeRaw && !cursor) {
+      return NextResponse.json({ error: "Cursor de página inválido" }, { status: 400 });
     }
 
     const supabase = getSupabaseServerClient();
@@ -49,22 +66,29 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: "hotelId es obligatorio" }, { status: 400 });
     }
 
+    // Candado de tenencia: la conversación tiene que ser del hotel activo, que
+    // ya se validó contra los hoteles del usuario. Va ANTES de leer un solo
+    // mensaje. Solo la columna que se usa: el teléfono para el respaldo por
+    // identidad y para clasificar las burbujas.
     const { data: convRow, error: convError } = await supabase
       .from(CONVERSATIONS_TABLE)
-      .select("*")
+      .select("id, guest_phone")
       .eq("id", conversationId)
       .eq("hotel_id", activeHotelId)
       .maybeSingle();
 
     if (convError) {
-      console.error("[inbox messages GET] conversation", convError);
-      return NextResponse.json({ error: convError.message }, { status: 502 });
+      console.error("[inbox messages GET] conversation", convError.code ?? "sin_code");
+      return NextResponse.json(
+        { error: isDev ? convError.message : "No se pudo leer la conversación" },
+        { status: 502 }
+      );
     }
     if (!convRow) {
       return NextResponse.json({ error: "Conversación no encontrada" }, { status: 404 });
     }
 
-    const cr = convRow as ConversationDbRow;
+    const cr = convRow as { id: string; guest_phone: string | null };
     // Identidad del huésped: `+E.164` si es teléfono, o el LID crudo de Meta.
     // Se usa para el filtro complementario y para clasificar cada burbuja.
     const guestPhone = normalizeWaIdentity(cr.guest_phone ?? "");
@@ -79,19 +103,18 @@ export async function GET(request: Request) {
       activeHotelRow ? [{ id: activeHotelId, whatsapp_number: activeHotelRow.whatsappNumber }] : []
     );
 
-    // `conversationId` como criterio principal; la identidad queda de respaldo
-    // para las filas antiguas sin `conversation_id`.
-    const { rows: msgRows, truncated } = await fetchWubbyRowsForGuestAtHotel(
-      supabase,
-      activeHotelId,
-      guestPhoneRaw || guestPhone,
-      conversationId
-    );
-    if (truncated) {
-      console.warn("[inbox messages GET] historial truncado", { conversationId, activeHotelId });
-    }
+    // Últimos 50 (o los 50 anteriores al cursor): `conversation_id` como
+    // criterio principal y, en paralelo, la identidad del huésped para las
+    // filas sin `conversation_id`. Ver `fetchConversationMessagePage`.
+    const page = await fetchConversationMessagePage(supabase, {
+      hotelId: activeHotelId,
+      conversationId,
+      guestIdentity: guestPhoneRaw || guestPhone,
+      cursor,
+      limit: MESSAGES_PAGE_SIZE,
+    });
 
-    const messages: Message[] = msgRows.map((row) => {
+    const messages: Message[] = page.rows.map((row) => {
       const identities = resolveHotelWaIdentitiesForRow(row, hotelWhatsappById);
       return buildMessageFromWubbyRow(row, guestPhone, identities).message;
     });
@@ -101,10 +124,17 @@ export async function GET(request: Request) {
       guestPhone: guestPhone || guestPhoneRaw,
       messages,
       fetchedCount: messages.length,
+      // "Cargar anteriores": se pide con `?before=<olderCursor>`.
+      hasOlder: page.hasOlder,
+      olderCursor: page.olderCursor,
     });
   } catch (e) {
+    // El mensaje puede traer el detalle crudo de Supabase: solo fuera de producción.
     const msg = e instanceof Error ? e.message : "Error desconocido";
-    console.error("[inbox messages GET]", e);
-    return NextResponse.json({ error: msg }, { status: 500 });
+    console.error("[inbox messages GET]", isDev ? e : "error al leer el hilo");
+    return NextResponse.json(
+      { error: isDev ? msg : "No se pudo cargar el historial" },
+      { status: 500 }
+    );
   }
 }

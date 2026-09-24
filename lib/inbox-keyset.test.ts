@@ -5,6 +5,7 @@ import {
   buildDescKeysetOrFilter,
   compareDescKeyset,
   encodeKeysetCursor,
+  mergeKeysetPages,
   parseKeysetCursor,
   type KeysetCursor,
 } from "./inbox-keyset.ts";
@@ -122,4 +123,58 @@ test("el comparador empata timestamps con distinta precisión fraccional", () =>
       { sortValue: "2026-09-24T10:00:00.55", id: "1" }
     ) < 0
   );
+});
+
+test("hilo: predicado keyset sobre created_at naive e id entero", () => {
+  const cursor = parseKeysetCursor("2026-09-24T10:04:05.123456|98765");
+  assert.ok(cursor);
+  assert.equal(
+    buildDescKeysetOrFilter("created_at", "id", cursor),
+    'created_at.lt."2026-09-24T10:04:05.123456",and(created_at.eq."2026-09-24T10:04:05.123456",id.lt.98765)'
+  );
+});
+
+type Msg = { created_at: string; id: number; source: string };
+const keyOf = (m: Msg) => ({ sortValue: m.created_at, id: String(m.id) });
+
+test("hilo: mezclar la consulta por conversation_id con la de filas huérfanas da el tope global", () => {
+  // A: filas con conversation_id. B: filas viejas sin conversation_id que
+  // matchean por teléfono, intercaladas en el tiempo con las de A.
+  const byConversation: Msg[] = [
+    { created_at: "2026-09-24T10:00:05", id: 50, source: "A" },
+    { created_at: "2026-09-24T10:00:03", id: 30, source: "A" },
+    { created_at: "2026-09-24T10:00:01", id: 10, source: "A" },
+  ];
+  const orphans: Msg[] = [
+    { created_at: "2026-09-24T10:00:04", id: 40, source: "B" },
+    { created_at: "2026-09-24T10:00:02", id: 20, source: "B" },
+    { created_at: "2026-09-24T10:00:00", id: 5, source: "B" },
+  ];
+
+  const { page, hasMore } = mergeKeysetPages([byConversation, orphans], keyOf, 4);
+  assert.deepEqual(page.map((m) => m.id), [50, 40, 30, 20]);
+  assert.equal(hasMore, true);
+});
+
+test("hilo: una fila que llega por las dos consultas cuenta una vez", () => {
+  const row: Msg = { created_at: "2026-09-24T10:00:05", id: 7, source: "A" };
+  const { page, hasMore } = mergeKeysetPages([[row], [{ ...row, source: "B" }]], keyOf, 50);
+  assert.equal(page.length, 1);
+  assert.equal(hasMore, false);
+});
+
+test("hilo: sin nada detrás del tope no hay 'cargar anteriores'", () => {
+  const rows: Msg[] = Array.from({ length: 50 }, (_, i) => ({
+    created_at: `2026-09-24T10:${String(i).padStart(2, "0")}:00`,
+    id: i + 1,
+    source: "A",
+  }));
+  const exact = mergeKeysetPages([rows, []], keyOf, 50);
+  assert.equal(exact.page.length, 50);
+  assert.equal(exact.hasMore, false);
+
+  const oneMore = mergeKeysetPages([rows, [{ created_at: "2026-09-23T09:00:00", id: 999, source: "B" }]], keyOf, 50);
+  assert.equal(oneMore.hasMore, true);
+  // La que sobra es la más vieja: la página se queda con las 50 más nuevas.
+  assert.ok(!oneMore.page.some((m) => m.id === 999));
 });

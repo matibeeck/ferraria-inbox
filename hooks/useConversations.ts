@@ -64,6 +64,7 @@ function keepOpenThread(incoming: Conversation, prevActive: Conversation | undef
     ...incoming,
     messages: prevActive.messages,
     messagesLoaded: prevActive.messagesLoaded,
+    olderMessagesCursor: prevActive.olderMessagesCursor,
   };
 }
 

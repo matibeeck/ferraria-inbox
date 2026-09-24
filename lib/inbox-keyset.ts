@@ -135,3 +135,33 @@ function normalizeTimestampForCompare(value: string): string {
   const [, date, time, fraction = "", rest] = match;
   return `${date}T${time}.${fraction.padEnd(6, "0")}${rest}`;
 }
+
+/**
+ * Mezcla varias consultas ya ordenadas por `(sort desc, id desc)` y devuelve el
+ * tope GLOBAL de `limit` filas, más si quedó algo detrás.
+ *
+ * Correcto porque cada lista trae hasta `limit + 1` filas con el mismo cursor:
+ * las `limit + 1` más nuevas de la unión están, por fuerza, entre las
+ * `limit + 1` más nuevas de alguna de las listas. Sirve para que dos consultas
+ * paralelas se comporten como una sola paginada, sin ir en serie.
+ *
+ * Deduplica por id: una fila que matchea las dos consultas cuenta una vez.
+ */
+export function mergeKeysetPages<T>(
+  lists: T[][],
+  keyOf: (row: T) => { sortValue: string | null; id: string },
+  limit: number
+): { page: T[]; hasMore: boolean } {
+  const byId = new Map<string, { row: T; key: { sortValue: string | null; id: string } }>();
+  for (const list of lists) {
+    for (const row of list) {
+      const key = keyOf(row);
+      if (!byId.has(key.id)) byId.set(key.id, { row, key });
+    }
+  }
+  const sorted = [...byId.values()].sort((a, b) => compareDescKeyset(a.key, b.key));
+  return {
+    page: sorted.slice(0, limit).map((entry) => entry.row),
+    hasMore: sorted.length > limit,
+  };
+}

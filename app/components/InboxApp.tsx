@@ -131,6 +131,11 @@ const COMPOSER_MAX_HEIGHT_PX = 104;
  * aparecería estando ya abajo.
  */
 const THREAD_BOTTOM_SLACK_PX = 56;
+/**
+ * Distancia al borde de arriba del hilo a la que se piden solos los mensajes
+ * anteriores. Holgada para que la página llegue antes de tocar el techo.
+ */
+const THREAD_TOP_AUTOLOAD_PX = 120;
 
 /**
  * Forma de las filas de la lista de conversaciones, compartida por Huéspedes y
@@ -2722,7 +2727,7 @@ export default function InboxApp() {
     [setConversations]
   );
 
-  const { messagesError } = useInboxConversationMessages(
+  const { messagesError, loadingOlder, loadOlder } = useInboxConversationMessages(
     selectedId,
     conversationHotelId,
     setConversations,
@@ -3327,8 +3332,36 @@ export default function InboxApp() {
   const [showJumpToEnd, setShowJumpToEnd] = useState(false);
   const [missedCount, setMissedCount] = useState(0);
 
+  /**
+   * "Cargar anteriores". El cursor sale de la conversación abierta y solo
+   * existe cuando el hilo ya es autoritativo: antes de eso no hay "atrás".
+   */
+  const threadScrollRef = useRef<HTMLDivElement>(null);
+  const olderMessagesCursor = selected?.messagesLoaded ? selected.olderMessagesCursor ?? null : null;
+  /**
+   * Foto del scroll justo antes de anteponer una página vieja. Al pintarla se
+   * corre el `scrollTop` exactamente lo que creció el hilo por arriba, así la
+   * burbuja que la recepcionista estaba leyendo no se mueve de lugar.
+   */
+  const prependAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
+  const firstBubbleIdRef = useRef<string | null>(null);
+  const requestOlderMessages = useCallback(() => {
+    if (!olderMessagesCursor || loadingOlder) return;
+    const el = threadScrollRef.current;
+    prependAnchorRef.current = el ? { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop } : null;
+    void loadOlder(olderMessagesCursor);
+  }, [olderMessagesCursor, loadingOlder, loadOlder]);
+  /** Lo lee el handler de scroll, que es estable y no puede depender de esto. */
+  const requestOlderMessagesRef = useRef(requestOlderMessages);
+  useEffect(() => {
+    requestOlderMessagesRef.current = requestOlderMessages;
+  }, [requestOlderMessages]);
+
   const handleThreadScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {
     const el = event.currentTarget;
+    // Llegar arriba pide la página anterior sola; el botón queda para quien
+    // prefiera hacerlo a mano (y para cuando el hilo todavía no scrollea).
+    if (el.scrollTop <= THREAD_TOP_AUTOLOAD_PX) requestOlderMessagesRef.current();
     // Margen de 56px: el navegador no siempre deja el scroll clavado en el
     // píxel exacto del final, y sin holgura el botón aparecería solo.
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= THREAD_BOTTOM_SLACK_PX;
@@ -3351,8 +3384,27 @@ export default function InboxApp() {
     setShowJumpToEnd(false);
     setMissedCount(0);
     seenBubbleCountRef.current = 0;
+    prependAnchorRef.current = null;
     scrollEndRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
   }, [selectedId]);
+
+  /*
+    Página vieja antepuesta: se reconoce porque cambió la PRIMERA burbuja. Se
+    compensa el scroll antes de pintar (layout effect) y se da por visto lo que
+    entró arriba, para que el efecto de mensaje nuevo de abajo no lo cuente como
+    "mensajes nuevos" ni encienda el botón de ir al final.
+  */
+  useLayoutEffect(() => {
+    const firstId = threadBubbles[0]?.id ?? null;
+    const previousFirstId = firstBubbleIdRef.current;
+    firstBubbleIdRef.current = firstId;
+    const anchor = prependAnchorRef.current;
+    if (!anchor || firstId === previousFirstId) return;
+    prependAnchorRef.current = null;
+    const el = threadScrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight - anchor.scrollHeight + anchor.scrollTop;
+    seenBubbleCountRef.current = threadBubbles.length;
+  }, [threadBubbles]);
 
   /*
     Mensaje nuevo en el hilo abierto.
@@ -5691,11 +5743,33 @@ export default function InboxApp() {
               </div>
 
               <div
+                ref={threadScrollRef}
                 onScroll={handleThreadScroll}
                 className="ibx-scroll min-h-0 w-full min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain px-3 py-3 sm:px-5 lg:px-6"
                 style={{ background: "var(--bg-app)" }}
               >
                 <div className="w-full min-w-0">
+                  {!threadLoading && olderMessagesCursor && (
+                    <div className="flex justify-center pb-2">
+                      <button
+                        type="button"
+                        onClick={requestOlderMessages}
+                        disabled={loadingOlder}
+                        className="d-act grotesk inline-flex items-center gap-2 px-3.5 py-2 disabled:opacity-70"
+                        style={{
+                          borderRadius: 9,
+                          border: "1px solid var(--border-soft)",
+                          background: "var(--bg-card)",
+                          color: "var(--text-primary)",
+                          fontSize: 12.5,
+                          fontWeight: 600,
+                        }}
+                      >
+                        {loadingOlder && <Spinner className="h-3.5 w-3.5 animate-spin" />}
+                        {loadingOlder ? "Cargando mensajes anteriores…" : "Cargar mensajes anteriores"}
+                      </button>
+                    </div>
+                  )}
                   {threadLoading ? (
                     <InboxThreadSkeleton />
                   ) : (

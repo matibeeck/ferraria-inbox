@@ -6,6 +6,12 @@ import {
   POSTGREST_PAGE_SIZE,
 } from "@/lib/message-limits";
 import { WUBBY_SELECT_COLUMNS, WUBBY_TABLE, type WubbyWhatsappRow } from "@/lib/wubby-schema";
+import {
+  buildDescKeysetOrFilter,
+  encodeKeysetCursor,
+  mergeKeysetPages,
+  type KeysetCursor,
+} from "@/lib/inbox-keyset";
 
 /**
  * Resultado de un barrido paginado. `truncated` indica que se alcanzó
@@ -171,4 +177,109 @@ export async function fetchWubbyRowsForGuestAcrossHotels(
   const orFilter = buildGuestPhoneOrFilter(guestPhone);
   if (!orFilter) return { rows: [], truncated: false };
   return fetchWubbyPagesAscending(supabase, hotelIds, orFilter);
+}
+
+/** Página del hilo que devuelve `fetchConversationMessagePage`. */
+export type ConversationMessagePage = {
+  /** Filas en orden ASCENDENTE (la más vieja primero), listas para pintar. */
+  rows: WubbyWhatsappRow[];
+  /** Hay mensajes más viejos que la primera fila de `rows`. */
+  hasOlder: boolean;
+  /** Cursor `<created_at>|<id>` de la fila más vieja, para "cargar anteriores". */
+  olderCursor: string | null;
+};
+
+function wubbyKeysetKey(row: WubbyWhatsappRow): { sortValue: string | null; id: string } {
+  return {
+    sortValue: typeof row.created_at === "string" ? row.created_at : null,
+    id: String(row.id),
+  };
+}
+
+/**
+ * Una página del hilo: los `limit` mensajes más nuevos antes del cursor (o los
+ * últimos si no hay cursor), por keyset `(created_at desc, id desc)`.
+ *
+ * Son DOS consultas, pero en PARALELO y con tope, nunca páginas en serie:
+ *
+ * A) `conversation_id = X` — el camino principal, que recorre
+ *    `idx_wubby_conv_recent (conversation_id, created_at desc, id desc)` y se
+ *    corta a `limit + 1` filas.
+ * B) Respaldo para filas viejas (y las que escribe n8n) con `conversation_id`
+ *    NULL: mismo hotel, `conversation_id is null` y el match por identidad del
+ *    huésped (teléfono con y sin `+`, o el LID crudo). También `limit + 1`.
+ *    Exigir el null es a propósito: una fila de OTRA conversación del mismo
+ *    teléfono no se cuela en este hilo.
+ *
+ * Con el mismo cursor en las dos, las `limit` más nuevas de la unión salen de
+ * mezclar ambas en memoria (`mergeKeysetPages`): el resultado es idéntico al de
+ * una sola consulta paginada, sin pagar un viaje extra. Ninguna de las dos
+ * necesita el resultado de la otra.
+ *
+ * `hotel_id` va en las DOS: el tenant nunca depende del `conversation_id`.
+ */
+export async function fetchConversationMessagePage(
+  supabase: SupabaseClient,
+  params: {
+    hotelId: string;
+    conversationId: string;
+    guestIdentity: string;
+    cursor: KeysetCursor | null;
+    limit: number;
+  }
+): Promise<ConversationMessagePage> {
+  const { hotelId, conversationId, guestIdentity, cursor, limit } = params;
+  const keyset = cursor ? buildDescKeysetOrFilter("created_at", "id", cursor) : null;
+
+  let byConversation = supabase
+    .from(WUBBY_TABLE)
+    .select(WUBBY_SELECT_COLUMNS)
+    .eq("hotel_id", hotelId)
+    .eq("conversation_id", conversationId);
+  if (keyset) byConversation = byConversation.or(keyset);
+
+  const phoneFilter = buildGuestPhoneOrFilter(guestIdentity);
+  let orphanRequest = null;
+  if (phoneFilter) {
+    let orphans = supabase
+      .from(WUBBY_TABLE)
+      .select(WUBBY_SELECT_COLUMNS)
+      .eq("hotel_id", hotelId)
+      .is("conversation_id", null);
+    // Un solo `or=` por consulta: la identidad y el keyset se anidan en un
+    // `and(...)` para no depender de cómo combine PostgREST dos `or=` sueltos.
+    orphans = keyset
+      ? orphans.or(`and(or(${phoneFilter}),or(${keyset}))`)
+      : orphans.or(phoneFilter);
+    orphanRequest = orphans
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(limit + 1);
+  }
+
+  const [primary, orphan] = await Promise.all([
+    byConversation
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(limit + 1),
+    orphanRequest,
+  ]);
+
+  if (primary.error) throw new Error(primary.error.message);
+  if (orphan?.error) throw new Error(orphan.error.message);
+
+  const { page, hasMore } = mergeKeysetPages(
+    [
+      (primary.data ?? []) as unknown as WubbyWhatsappRow[],
+      (orphan?.data ?? []) as unknown as WubbyWhatsappRow[],
+    ],
+    wubbyKeysetKey,
+    limit
+  );
+
+  const oldest = page.at(-1);
+  const olderCursor =
+    hasMore && oldest ? encodeKeysetCursor(wubbyKeysetKey(oldest).sortValue, oldest.id) : null;
+
+  return { rows: [...page].reverse(), hasOlder: hasMore, olderCursor };
 }

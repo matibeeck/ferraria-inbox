@@ -190,12 +190,21 @@ export interface Conversation {
    */
   messages: Message[];
   /**
-   * `true` únicamente cuando el hilo se cargó desde `GET /api/inbox/messages`,
-   * que sí devuelve el historial completo del huésped. Es un flag de cliente:
-   * el servidor lo emite siempre en `false`. Consúltalo antes de tratar la
-   * ausencia de un mensaje en `messages` como información real.
+   * `true` únicamente cuando el hilo se cargó desde `GET /api/inbox/messages`.
+   * Es un flag de cliente: el servidor lo emite siempre en `false`.
+   *
+   * OJO: autoritativo NO significa completo. El endpoint trae los últimos 50 y
+   * lo anterior se pide con "Cargar anteriores" (`olderMessagesCursor`). La
+   * ausencia de un mensaje VIEJO en `messages` no dice nada; la de uno de los
+   * recientes sí.
    */
   messagesLoaded: boolean;
+  /**
+   * Cursor `<created_at>|<id>` del mensaje más viejo cargado, para pedir la
+   * página anterior del hilo. `null`/ausente = no hay más atrás (o el hilo no
+   * se cargó todavía). Flag de cliente, igual que `messagesLoaded`.
+   */
+  olderMessagesCursor?: string | null;
   /** Teléfono huésped normalizado (+E.164) para envío / matching */
   guestPhone: string;
   /**
