@@ -2510,6 +2510,13 @@ export default function InboxApp() {
    */
   const [deepLinkMissing, setDeepLinkMissing] = useState(false);
   const [activeHotelId, setActiveHotelId] = useState<string | null>(() => readStoredActiveHotelId());
+  // Antes de `useConversations`: Realtime le avisa a los timers cuando cambia la
+  // cotización o el seguimiento de una conversación.
+  const {
+    followups: followupTimers,
+    removeFollowup,
+    refreshFollowups,
+  } = useFollowupTimers();
   const {
     conversations: rawConversations,
     setConversations,
@@ -2526,7 +2533,11 @@ export default function InboxApp() {
     activeHotelId: resolvedActiveHotelId,
     engineEnabled,
     templatesEnabled,
-  } = useConversations({ activeConversationId: selectedId, activeHotelId });
+  } = useConversations({
+    activeConversationId: selectedId,
+    activeHotelId,
+    onQuoteFollowupChanged: refreshFollowups,
+  });
   /**
    * Gate de UI de las plantillas. El candado real vive en
    * `POST /api/send-whatsapp-template`; aca solo se apaga el boton.
@@ -2538,7 +2549,6 @@ export default function InboxApp() {
    * aviso se calla: decir "inhabilitado" antes de saberlo seria mentir.
    */
   const showTemplatesDisabledNote = templatesDisabled && !loading;
-  const { followups: followupTimers, removeFollowup } = useFollowupTimers();
 
   /**
    * ÚNICO punto donde se decide si una conversación cuenta como staff.

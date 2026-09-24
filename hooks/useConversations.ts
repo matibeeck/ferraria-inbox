@@ -58,6 +58,8 @@ export type RefetchOptions = {
 export type UseConversationsOptions = {
   activeConversationId?: string;
   activeHotelId?: string | null;
+  /** Ver `UseInboxRealtimeOptions.onQuoteFollowupChanged`. */
+  onQuoteFollowupChanged?: () => void;
 };
 
 /** Ventana de coalescing para recargas por reconciliación Realtime sin contexto local. */
@@ -411,6 +413,7 @@ export function useConversations(options?: UseConversationsOptions) {
     },
     onRealtimeConnection,
     onRealtimeRecovered,
+    onQuoteFollowupChanged: options?.onQuoteFollowupChanged,
   });
 
   return {

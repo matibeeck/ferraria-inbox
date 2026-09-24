@@ -77,7 +77,36 @@ export type UseInboxRealtimeOptions = {
    * recargar lo que esté mostrando.
    */
   onRealtimeRecovered?: () => void;
+  /**
+   * Cambió el estado de cotización o de seguimiento de una conversación
+   * (`quote_followup_due_at`, `quote_followup_sent`, `quote_followup_sent_at` o
+   * `cotizacion`). El consumidor recarga los timers de seguimiento; reemplaza el
+   * poll de 60 s de `get_pending_followups`.
+   */
+  onQuoteFollowupChanged?: () => void;
 };
+
+/** Columnas de `conversations` que mueven los timers de seguimiento. */
+const FOLLOWUP_COLUMNS = [
+  "quote_followup_due_at",
+  "quote_followup_sent",
+  "quote_followup_sent_at",
+  "cotizacion",
+] as const;
+
+/**
+ * Huella de las columnas de seguimiento de una fila. `null` = la fila no trae
+ * ninguna de esas columnas con valor (sin cotización ni seguimiento).
+ *
+ * Se compara contra la última huella vista de la misma conversación en vez de
+ * contra `payload.old`: sin `REPLICA IDENTITY FULL`, `payload.old` de un UPDATE
+ * trae solo la PK y no dice qué cambió.
+ */
+function followupSignature(row: Record<string, unknown>): string | null {
+  const values = FOLLOWUP_COLUMNS.map((column) => row[column] ?? null);
+  if (values.every((value) => value === null || value === false || value === "")) return null;
+  return JSON.stringify(values);
+}
 
 /** Reordena la lista por `lastActivityIso` descendente. */
 function sortByActivity(list: Conversation[]): Conversation[] {
@@ -194,6 +223,7 @@ export function useInboxRealtime({
   onUrgentHandoffBanner,
   onRealtimeConnection,
   onRealtimeRecovered,
+  onQuoteFollowupChanged,
 }: UseInboxRealtimeOptions) {
   const setConversationsRef = useRef(setConversations);
   const activeConversationIdRef = useRef(activeConversationId);
@@ -203,6 +233,13 @@ export function useInboxRealtime({
   const onUrgentBannerRef = useRef(onUrgentHandoffBanner);
   const onConnRef = useRef(onRealtimeConnection);
   const onRecoveredRef = useRef(onRealtimeRecovered);
+  const onQuoteFollowupChangedRef = useRef(onQuoteFollowupChanged);
+  /**
+   * Última huella de seguimiento vista por conversación (ver
+   * `followupSignature`). Vive fuera del efecto del canal para que sobreviva a
+   * una re-suscripción.
+   */
+  const followupSignatureByIdRef = useRef<Map<string, string | null>>(new Map());
 
   /** Último aviso urgente por clave de conversación / caso. */
   const urgentNotifiedAtRef = useRef<Map<string, number>>(new Map());
@@ -240,6 +277,10 @@ export function useInboxRealtime({
   useEffect(() => {
     onRecoveredRef.current = onRealtimeRecovered;
   }, [onRealtimeRecovered]);
+
+  useEffect(() => {
+    onQuoteFollowupChangedRef.current = onQuoteFollowupChanged;
+  }, [onQuoteFollowupChanged]);
 
   useEffect(() => {
     if (typeof window === "undefined" || typeof Notification === "undefined") return;
@@ -361,6 +402,18 @@ export function useInboxRealtime({
 
       const newRow = payload.new as ConversationDbRow | null;
       if (!newRow || !newRow.id) return;
+
+      // Timers de seguimiento: aviso solo si la huella cambió respecto de la
+      // última vista. La primera vez que se ve una conversación no hay contra
+      // qué comparar, así que se avisa solo si trae cotización o seguimiento.
+      const signature = followupSignature(newRow as unknown as Record<string, unknown>);
+      const signatures = followupSignatureByIdRef.current;
+      const known = signatures.has(newRow.id);
+      const previous = signatures.get(newRow.id);
+      signatures.set(newRow.id, signature);
+      if (known ? previous !== signature : signature !== null) {
+        onQuoteFollowupChangedRef.current?.();
+      }
 
       if (eventType === "INSERT") {
         setter((prev) => {
