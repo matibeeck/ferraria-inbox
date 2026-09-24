@@ -1,54 +1,38 @@
 import { NextResponse } from "next/server";
 import { requireSessionUser } from "@/lib/auth/require-user";
 import { assertConversationInHotel, requireActiveHotel } from "@/lib/auth/require-hotel";
-import { CONVERSATIONS_TABLE } from "@/lib/conversation-schema";
-import { buildGuestPhoneOrFilter } from "@/lib/inbox-fetch-messages";
-import { pickMostAdvancedReceipt, toMetaDeliveryStatus } from "@/lib/delivery-status";
-import type { MessageDeliveryReceipt } from "@/lib/inbox-types";
+import {
+  MAX_STATUS_WAMIDS,
+  fetchReceiptsForWamids,
+  uniqueWamids,
+} from "@/lib/message-statuses-server";
 import { WUBBY_TABLE } from "@/lib/wubby-schema";
 
 export const dynamic = "force-dynamic";
 
-const STATUSES_TABLE = "message_statuses";
-
 /**
- * Tope de wamids que se cruzan por petición. El `.in()` viaja en la URL de
- * PostgREST y cada wamid mide 62 caracteres, así que 250 son ~16 KB: entra sin
- * problema y cubre de sobra el tramo del hilo que alguien mira. Se toman los
- * MÁS RECIENTES; los fallos viejos ya no le sirven a recepción.
+ * Forma de un wamid de Meta (`wamid.` + base64). Nada que no calce entra al
+ * `.in()`: el valor viene del navegador.
  */
-const MAX_WAMIDS = 250;
+const WAMID_PATTERN = /^[A-Za-z0-9._=+/-]{8,200}$/;
 
 type RouteContext = { params: Promise<{ id: string }> };
 
-type MessageStatusRow = {
-  wamid: string | null;
-  status: string | null;
-  error_code: number | null;
-  error_title: string | null;
-};
-
 /**
- * GET /api/conversations/[id]/message-statuses?hotelId=…
+ * GET /api/conversations/[id]/message-statuses?hotelId=…&wamids=a,b,c
  *
- * Devuelve los acuses de Meta de los mensajes salientes de una conversación
- * —sent, delivered, read y failed— para que el inbox pinte los ticks contra el
- * estado REAL de entrega y no contra el optimista local.
+ * Refresco puntual de acuses de Meta —sent, delivered, read, failed— para los
+ * wamids que pide el cliente. Hoy lo usa solo el refetch de 6 s tras enviar:
+ * al abrir el hilo, los acuses ya vienen en `GET /api/inbox/messages` junto
+ * con cada página.
  *
- * Por qué existe este endpoint y no una query directa desde el navegador:
- * `message_statuses` solo es accesible con la service role, así que el cliente
- * no puede leerla ni con el JWT del usuario.
+ * Antes este endpoint releía hasta 250 filas de `Wubby_Whatsapp` por teléfono
+ * en cada llamada para sacar los wamids. Ahora los trae el cliente, y el
+ * servidor solo comprueba que sean de un hotel del usuario y de ESTA
+ * conversación (o de una fila vieja sin `conversation_id`) antes de cruzarlos.
  *
- * Por qué el cruce va por `wamid` y no por `conversation_id`: en producción esa
- * columna de `message_statuses` viene NULL en el 100 % de las filas y
- * `hotel_id` en un 16 %. La lista de wamids se deriva de `Wubby_Whatsapp`
- * filtrada por el hotel ya autorizado, así que además es el camino tenant-safe:
- * un wamid ajeno nunca entra en el `.in()`.
- *
- * Antes esto filtraba `.eq('status','failed')` y tiraba el resto, porque los
- * ticks salían del estado local. Se quitó el filtro: un ✓✓ que solo significaba
- * "la fila está en la base" le decía al recepcionista que el huésped había
- * recibido un mensaje que quizá nunca llegó.
+ * Sin `wamids` responde vacío: un cliente de antes del cambio se queda con los
+ * acuses que ya tenía, sin error.
  */
 export async function GET(request: Request, context: RouteContext) {
   try {
@@ -65,97 +49,53 @@ export async function GET(request: Request, context: RouteContext) {
     });
     if (tenant.response) return tenant.response;
 
-    const ownership = await assertConversationInHotel(
-      tenant.supabase,
-      conversationId,
-      tenant.allowedHotelIds
-    );
-    if (ownership.response) return ownership.response;
-    const hotelId = ownership.hotelId;
-
-    const { data: conversation, error: conversationError } = await tenant.supabase
-      .from(CONVERSATIONS_TABLE)
-      .select("guest_phone")
-      .eq("id", conversationId)
-      .eq("hotel_id", hotelId)
-      .maybeSingle();
-
-    if (conversationError) {
-      console.error("[message-statuses] lookup conversación", conversationError.message);
-      return NextResponse.json({ error: "No se pudo leer la conversación" }, { status: 502 });
-    }
-
-    // El hilo se resuelve por teléfono + hotel (igual que `/api/inbox/messages`):
-    // las filas que escribe n8n no traen `conversation_id`.
-    const orFilter = buildGuestPhoneOrFilter(String(conversation?.guest_phone ?? ""));
-    if (!orFilter) {
+    const requested = uniqueWamids(
+      (new URL(request.url).searchParams.get("wamids") ?? "").split(",")
+    )
+      .filter((wamid) => WAMID_PATTERN.test(wamid))
+      .slice(0, MAX_STATUS_WAMIDS);
+    if (requested.length === 0) {
       return NextResponse.json({ statuses: [] });
     }
 
-    const { data: wubbyRows, error: wubbyError } = await tenant.supabase
-      .from(WUBBY_TABLE)
-      .select("wamid")
-      .eq("hotel_id", hotelId)
-      .or(orFilter)
-      .not("wamid", "is", null)
-      .order("created_at", { ascending: false })
-      .order("id", { ascending: false })
-      .limit(MAX_WAMIDS);
+    // Independientes: el dueño de la conversación y las filas de esos wamids
+    // dentro de los hoteles permitidos. El cruce de las dos va después.
+    const [ownership, wubby] = await Promise.all([
+      assertConversationInHotel(tenant.supabase, conversationId, tenant.allowedHotelIds),
+      tenant.supabase
+        .from(WUBBY_TABLE)
+        .select("wamid, hotel_id, conversation_id")
+        .in("hotel_id", tenant.allowedHotelIds)
+        .in("wamid", requested)
+        .limit(MAX_STATUS_WAMIDS * 2),
+    ]);
+    if (ownership.response) return ownership.response;
 
-    if (wubbyError) {
-      console.error("[message-statuses] lookup wamids", wubbyError.message);
+    if (wubby.error) {
+      console.error("[message-statuses] lookup wamids", wubby.error.code ?? "sin_code");
       return NextResponse.json({ error: "No se pudieron leer los mensajes" }, { status: 502 });
     }
 
-    const wamids = Array.from(
-      new Set(
-        (wubbyRows ?? [])
-          .map((row) => (typeof row.wamid === "string" ? row.wamid.trim() : ""))
-          .filter(Boolean)
-      )
+    // Solo cruzan los wamids de ESTE hotel y de ESTA conversación (o de filas
+    // viejas que nunca tuvieron `conversation_id`).
+    const allowed = uniqueWamids(
+      ((wubby.data ?? []) as Array<{
+        wamid: string | null;
+        hotel_id: string | null;
+        conversation_id: string | null;
+      }>)
+        .filter(
+          (row) =>
+            row.hotel_id === ownership.hotelId &&
+            (row.conversation_id === conversationId || row.conversation_id == null)
+        )
+        .map((row) => row.wamid)
     );
 
-    // Sin wamids no hay nada que cruzar. Es el caso ESPERADO en los mensajes
-    // históricos y en los hoteles que aún envían por n8n, no un error.
-    if (wamids.length === 0) {
-      return NextResponse.json({ statuses: [] });
-    }
-
-    const { data: statusRows, error: statusError } = await tenant.supabase
-      .from(STATUSES_TABLE)
-      .select("wamid, status, error_code, error_title")
-      .in("wamid", wamids);
-
-    if (statusError) {
-      console.error("[message-statuses] lookup statuses", statusError.message);
-      return NextResponse.json({ error: "No se pudieron leer los estados" }, { status: 502 });
-    }
-
-    // Se colapsa a un acuse por wamid quedándose con el más avanzado. Hoy la
-    // tabla trae una sola fila por wamid, así que esto no descarta nada; existe
-    // para que un futuro log de transiciones no rompa el tick.
-    const byWamid = new Map<string, MessageDeliveryReceipt>();
-    for (const row of (statusRows ?? []) as MessageStatusRow[]) {
-      const wamid = typeof row.wamid === "string" ? row.wamid.trim() : "";
-      const status = toMetaDeliveryStatus(row.status);
-      // Un status desconocido se descarta: es preferible dejar la burbuja en ✓
-      // ("salió") que inventar una entrega a partir de un valor que no sabemos leer.
-      if (!wamid || !status) continue;
-
-      byWamid.set(
-        wamid,
-        pickMostAdvancedReceipt(byWamid.get(wamid), {
-          wamid,
-          status,
-          errorCode: row.error_code ?? null,
-          errorTitle: row.error_title ?? null,
-        })
-      );
-    }
-
-    return NextResponse.json({ statuses: [...byWamid.values()] });
+    const statuses = await fetchReceiptsForWamids(tenant.supabase, allowed);
+    return NextResponse.json({ statuses });
   } catch (e) {
-    console.error("[message-statuses]", e);
+    console.error("[message-statuses]", e instanceof Error ? e.name : "error");
     return NextResponse.json({ error: "Error desconocido" }, { status: 500 });
   }
 }

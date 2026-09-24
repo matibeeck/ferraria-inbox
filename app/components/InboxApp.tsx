@@ -58,7 +58,7 @@ import {
   isReplyBlockedByMetaPolicy,
   parseWhatsappInstant,
 } from "@/lib/meta-window";
-import { resolveDeliveryTick } from "@/lib/delivery-status";
+import { collectPendingReceiptWamids, resolveDeliveryTick } from "@/lib/delivery-status";
 import { STAFF_CONTACT_TEMPLATE_NAME } from "@/lib/staff-contacts";
 import { sendWhatsappTemplate } from "@/lib/send-whatsapp-template";
 import { tiempoTranscurrido } from "@/lib/service-tickets";
@@ -102,6 +102,8 @@ const LAZY_MEDIA_AUTO_LOAD_MS = 24 * 60 * 60 * 1000;
  * polling por algo que casi siempre sale bien.
  */
 const DELIVERY_STATUS_REFETCH_MS = 6000;
+/** Tope de wamids que pide ese refetch: los salientes recientes, no el hilo entero. */
+const RECEIPT_REFETCH_MAX_WAMIDS = 30;
 
 /**
  * Red de seguridad de la burbuja optimista. Si a los 8 s sigue en "Enviando…",
@@ -2727,24 +2729,29 @@ export default function InboxApp() {
     [setConversations]
   );
 
+  /**
+   * Acuses de entrega de Meta para el hilo abierto, indexados por `wamid`. Es
+   * la ÚNICA fuente que sabe de verdad si un mensaje le llegó al huésped: sin
+   * esto los ticks solo reflejan que la fila quedó guardada en la base.
+   *
+   * Llegan con cada página del hilo (`mergeReceipts`); el refetch tras enviar
+   * pide solo los wamids que todavía pueden cambiar.
+   */
+  const { deliveryReceipts, mergeReceipts, refetchDeliveryReceipts } = useMessageDeliveryReceipts(
+    selectedId,
+    conversationHotelId
+  );
+
   const { messagesError, loadingOlder, loadOlder } = useInboxConversationMessages(
     selectedId,
     conversationHotelId,
     setConversations,
     // Realtime volvió después de un corte: se recarga el hilo abierto porque lo
     // que pasó mientras estaba caído no llega solo.
-    realtimeRecoveryToken
+    realtimeRecoveryToken,
+    mergeReceipts
   );
 
-  /**
-   * Acuses de entrega de Meta para el hilo abierto, indexados por `wamid`. Es
-   * la ÚNICA fuente que sabe de verdad si un mensaje le llegó al huésped: sin
-   * esto los ticks solo reflejan que la fila quedó guardada en la base.
-   */
-  const { deliveryReceipts, refetchDeliveryReceipts } = useMessageDeliveryReceipts(
-    selectedId,
-    conversationHotelId
-  );
   const deliveryRefetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [query, setQuery] = useState("");
@@ -3530,13 +3537,34 @@ export default function InboxApp() {
    * Es best-effort: si el acuse llega más tarde, se verá al reabrir la
    * conversación. No se monta un polling por algo que en la práctica es raro.
    */
+  /**
+   * Lo que el timer necesita leer cuando dispara, 6 s después: el hilo y los
+   * acuses de ESE momento, no los del render en que se programó (el wamid del
+   * mensaje recién enviado suele llegar por Realtime en el medio).
+   */
+  const receiptRefetchSourceRef = useRef<{
+    messages: Message[];
+    receipts: Map<string, MessageDeliveryReceipt>;
+  }>({ messages: [], receipts: new Map() });
+  useEffect(() => {
+    receiptRefetchSourceRef.current = {
+      messages: selected?.messages ?? [],
+      receipts: deliveryReceipts,
+    };
+  }, [selected?.messages, deliveryReceipts]);
+
   const scheduleDeliveryReceiptsRefetch = useCallback(() => {
     if (deliveryRefetchTimerRef.current) {
       clearTimeout(deliveryRefetchTimerRef.current);
     }
     deliveryRefetchTimerRef.current = setTimeout(() => {
       deliveryRefetchTimerRef.current = null;
-      refetchDeliveryReceipts();
+      // Solo los salientes que todavía pueden cambiar (ni `read` ni `failed`),
+      // los más recientes primero: incluye el que se acaba de enviar.
+      const { messages, receipts } = receiptRefetchSourceRef.current;
+      void refetchDeliveryReceipts(
+        collectPendingReceiptWamids(messages, receipts, RECEIPT_REFETCH_MAX_WAMIDS)
+      );
     }, DELIVERY_STATUS_REFETCH_MS);
   }, [refetchDeliveryReceipts]);
 

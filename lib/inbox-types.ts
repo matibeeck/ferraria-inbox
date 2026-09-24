@@ -28,8 +28,9 @@ export type MessageDeliveryStatus = "pending" | "confirmed" | "failed";
 export type MetaDeliveryStatus = "sent" | "delivered" | "read" | "failed";
 
 /**
- * Acuse de Meta sobre un mensaje saliente, tal y como lo sirve
- * `GET /api/conversations/[id]/message-statuses`.
+ * Acuse de Meta sobre un mensaje saliente, tal y como lo sirven
+ * `GET /api/inbox/messages` (en `statuses`, por página del hilo) y el refresco
+ * `GET /api/conversations/[id]/message-statuses?wamids=…`.
  *
  * La fuente es `message_statuses` (service-role only), y se cruza con la
  * burbuja por `wamid`.

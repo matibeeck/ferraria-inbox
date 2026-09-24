@@ -3,6 +3,7 @@ import { buildMessageFromWubbyRow, normalizeWaIdentity } from "@/lib/chat-utils"
 import { CONVERSATIONS_TABLE } from "@/lib/conversation-schema";
 import { fetchConversationMessagePage } from "@/lib/inbox-fetch-messages";
 import { parseKeysetCursor } from "@/lib/inbox-keyset";
+import { fetchReceiptsForWamids, uniqueWamids } from "@/lib/message-statuses-server";
 import {
   buildHotelWhatsappByIdMap,
   resolveHotelWaIdentitiesForRow,
@@ -114,6 +115,14 @@ export async function GET(request: Request) {
       limit: MESSAGES_PAGE_SIZE,
     });
 
+    // Acuses de Meta SOLO de los wamids de esta página: dependen de las filas
+    // que acaban de llegar, que ya vienen filtradas por hotel y conversación.
+    // Antes eran un request aparte con tres consultas en serie.
+    const statuses = await fetchReceiptsForWamids(
+      supabase,
+      uniqueWamids(page.rows.map((row) => row.wamid))
+    );
+
     const messages: Message[] = page.rows.map((row) => {
       const identities = resolveHotelWaIdentitiesForRow(row, hotelWhatsappById);
       return buildMessageFromWubbyRow(row, guestPhone, identities).message;
@@ -127,6 +136,9 @@ export async function GET(request: Request) {
       // "Cargar anteriores": se pide con `?before=<olderCursor>`.
       hasOlder: page.hasOlder,
       olderCursor: page.olderCursor,
+      // wamid → status / error_code / error_title de los mensajes de ESTA
+      // página. El cliente los suma a los que ya tiene.
+      statuses,
     });
   } catch (e) {
     // El mensaje puede traer el detalle crudo de Supabase: solo fuera de producción.

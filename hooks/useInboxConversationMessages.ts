@@ -9,12 +9,14 @@ import {
   type SetStateAction,
 } from "react";
 import { getMessageDisplayMs } from "@/lib/chat-utils";
-import type { Conversation, Message } from "@/lib/inbox-types";
+import type { Conversation, Message, MessageDeliveryReceipt } from "@/lib/inbox-types";
 
 type MessagesResponse = {
   messages?: Message[];
   hasOlder?: boolean;
   olderCursor?: string | null;
+  /** Acuses de Meta de los mensajes de ESTA página. */
+  statuses?: MessageDeliveryReceipt[];
   error?: string;
 };
 
@@ -89,8 +91,17 @@ export function useInboxConversationMessages(
    * caído no llegó nada, y sin esto el hilo abierto se queda con un hueco hasta
    * que la recepcionista cambie de chat o refresque.
    */
-  reloadToken: number = 0
+  reloadToken: number = 0,
+  /**
+   * Recibe los acuses de cada página que se aplica (abrir, recargar, cargar
+   * anteriores). Solo se llama si la página es de la conversación abierta.
+   */
+  onStatuses?: (statuses: MessageDeliveryReceipt[]) => void
 ) {
+  const onStatusesRef = useRef(onStatuses);
+  useEffect(() => {
+    onStatusesRef.current = onStatuses;
+  }, [onStatuses]);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [messagesError, setMessagesError] = useState<string | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -136,6 +147,7 @@ export function useInboxConversationMessages(
         setConversations((prev) =>
           prev.map((c) => (c.id === convId ? applyNewestPage(c, messages, olderCursor) : c))
         );
+        onStatusesRef.current?.(json.statuses ?? []);
       } catch (e) {
         // Abortado (cambió la conversación, el hotel, o desmontó): la petición
         // quedó obsoleta, no falló. No es un error que deba ver el usuario ni
@@ -195,6 +207,8 @@ export function useInboxConversationMessages(
             };
           })
         );
+        // Esta página trae sus propios acuses.
+        onStatusesRef.current?.(json.statuses ?? []);
       } catch (e) {
         console.warn("[useInboxConversationMessages] anteriores", e);
       } finally {

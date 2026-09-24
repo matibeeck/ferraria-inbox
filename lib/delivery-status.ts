@@ -82,3 +82,91 @@ export function resolveDeliveryTick(
   if (localStatus === "pending") return "pending";
   return "sent";
 }
+
+/** Fila cruda de `message_statuses` (solo las columnas que se piden). */
+export type MessageStatusRow = {
+  wamid: string | null;
+  status: string | null;
+  error_code: number | null;
+  error_title: string | null;
+};
+
+/**
+ * Colapsa filas de `message_statuses` a UN acuse por `wamid`, el más avanzado.
+ * Hoy la tabla trae una sola fila por wamid, así que esto no descarta nada;
+ * existe para que un futuro log de transiciones no rompa el tick.
+ *
+ * Un status desconocido se descarta: es preferible dejar la burbuja en ✓
+ * ("salió") que inventar una entrega a partir de un valor que no sabemos leer.
+ */
+export function receiptsFromStatusRows(rows: MessageStatusRow[]): MessageDeliveryReceipt[] {
+  const byWamid = new Map<string, MessageDeliveryReceipt>();
+  for (const row of rows) {
+    const wamid = typeof row.wamid === "string" ? row.wamid.trim() : "";
+    const status = toMetaDeliveryStatus(row.status);
+    if (!wamid || !status) continue;
+    byWamid.set(
+      wamid,
+      pickMostAdvancedReceipt(byWamid.get(wamid), {
+        wamid,
+        status,
+        errorCode: row.error_code ?? null,
+        errorTitle: row.error_title ?? null,
+      })
+    );
+  }
+  return [...byWamid.values()];
+}
+
+/**
+ * Suma acuses nuevos a los que ya hay en memoria. Cada página del hilo trae
+ * los de SUS mensajes, así que abrir, cargar anteriores y el refetch tras
+ * enviar se van acumulando en el mismo mapa en vez de pisarse.
+ *
+ * Por wamid gana el más avanzado: un refetch que llega tarde con `sent` no
+ * puede bajar a ✓ una burbuja que ya estaba en ✓✓ azul.
+ *
+ * Devuelve el MISMO mapa si no cambió nada, para no re-renderizar el hilo.
+ */
+export function mergeDeliveryReceipts(
+  current: Map<string, MessageDeliveryReceipt>,
+  incoming: MessageDeliveryReceipt[]
+): Map<string, MessageDeliveryReceipt> {
+  let next: Map<string, MessageDeliveryReceipt> | null = null;
+  for (const receipt of incoming) {
+    const wamid = receipt.wamid?.trim();
+    if (!wamid) continue;
+    const base = next ?? current;
+    const existing = base.get(wamid);
+    const winner = pickMostAdvancedReceipt(existing, { ...receipt, wamid });
+    if (winner === existing) continue;
+    next ??= new Map(current);
+    next.set(wamid, winner);
+  }
+  return next ?? current;
+}
+
+/**
+ * Wamids de salientes que todavía pueden cambiar de acuse, los más recientes
+ * primero y con tope. Es lo que pide el refetch de 6 s tras enviar: `read` y
+ * `failed` ya son finales y no hace falta volver a preguntar por ellos.
+ */
+export function collectPendingReceiptWamids(
+  messages: Array<{ sender: string; wamid?: string | null; reactionToWamid?: string | null }>,
+  receipts: Map<string, MessageDeliveryReceipt>,
+  max: number
+): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (let i = messages.length - 1; i >= 0 && out.length < max; i -= 1) {
+    const m = messages[i]!;
+    if (m.sender === "user" || m.reactionToWamid) continue;
+    const wamid = m.wamid?.trim();
+    if (!wamid || seen.has(wamid)) continue;
+    seen.add(wamid);
+    const status = receipts.get(wamid)?.status;
+    if (status === "read" || status === "failed") continue;
+    out.push(wamid);
+  }
+  return out;
+}
