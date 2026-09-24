@@ -240,6 +240,13 @@ export function useInboxRealtime({
    * una re-suscripción.
    */
   const followupSignatureByIdRef = useRef<Map<string, string | null>>(new Map());
+  /**
+   * Algún canal de este hook ya llegó a SUBSCRIBED. Sobrevive a la
+   * re-suscripción por cambio de hotel: el primer SUBSCRIBED del canal nuevo
+   * dispara una recarga, porque entre el cierre del canal viejo y el alta del
+   * nuevo pudo entrar algo que ninguno de los dos vio.
+   */
+  const everSubscribedRef = useRef(false);
 
   /** Último aviso urgente por clave de conversación / caso. */
   const urgentNotifiedAtRef = useRef<Map<string, number>>(new Map());
@@ -289,7 +296,22 @@ export function useInboxRealtime({
     }
   }, []);
 
+  /**
+   * Hotel del canal. Con él se filtran las suscripciones en el servidor: antes
+   * iban sin filtro y Realtime evaluaba cada cambio de CUALQUIER hotel contra
+   * la RLS de cada suscriptor, para que el cliente lo descartara después.
+   */
+  const channelHotelId = activeHotelId?.trim() || null;
+
   useEffect(() => {
+    // Sin hotel resuelto todavía (la bandeja no respondió) no hay qué filtrar:
+    // el chip queda en "esperando" y el efecto vuelve a correr cuando llegue.
+    if (!channelHotelId) {
+      onConnRef.current?.("waiting");
+      return;
+    }
+    const hotelFilter = `hotel_id=eq.${channelHotelId}`;
+
     if (process.env.NODE_ENV === "development") {
       for (const n of activeDesktopNotificationsRef.current.values()) {
         try {
@@ -686,17 +708,52 @@ export function useInboxRealtime({
         return;
       }
 
+      const onConversation = handleConversationEvent as (
+        payload: RealtimePostgresChangesPayload<Record<string, unknown>>
+      ) => void;
+      const onWubby = handleWubbyPostgresChange as (
+        payload: RealtimePostgresChangesPayload<Record<string, unknown>>
+      ) => void;
+
+      // INSERT y UPDATE van filtrados por hotel en el servidor. DELETE va SIN
+      // filtro a propósito: sin `REPLICA IDENTITY FULL` la fila borrada llega
+      // solo con la PK, el servidor no puede evaluar `hotel_id` y el evento se
+      // perdería. Los handlers de DELETE solo quitan por id lo que ya está en
+      // pantalla, así que un borrado de otro hotel no cambia nada visible.
+      //
+      // Nombre por hotel: `client.channel()` devuelve el canal existente si el
+      // nombre coincide, y el `removeChannel` del canal anterior es async.
       channel = client
-        .channel("inbox-realtime")
+        .channel(`inbox-realtime:${channelHotelId}`)
         .on(
           "postgres_changes",
-          { event: "*", schema: "public", table: CONVERSATIONS_TABLE },
-          handleConversationEvent as (payload: RealtimePostgresChangesPayload<Record<string, unknown>>) => void
+          { event: "INSERT", schema: "public", table: CONVERSATIONS_TABLE, filter: hotelFilter },
+          onConversation
         )
         .on(
           "postgres_changes",
-          { event: "*", schema: "public", table: WUBBY_TABLE },
-          handleWubbyPostgresChange as (payload: RealtimePostgresChangesPayload<Record<string, unknown>>) => void
+          { event: "UPDATE", schema: "public", table: CONVERSATIONS_TABLE, filter: hotelFilter },
+          onConversation
+        )
+        .on(
+          "postgres_changes",
+          { event: "DELETE", schema: "public", table: CONVERSATIONS_TABLE },
+          onConversation
+        )
+        .on(
+          "postgres_changes",
+          { event: "INSERT", schema: "public", table: WUBBY_TABLE, filter: hotelFilter },
+          onWubby
+        )
+        .on(
+          "postgres_changes",
+          { event: "UPDATE", schema: "public", table: WUBBY_TABLE, filter: hotelFilter },
+          onWubby
+        )
+        .on(
+          "postgres_changes",
+          { event: "DELETE", schema: "public", table: WUBBY_TABLE },
+          onWubby
         )
         .subscribe((status, err) => {
           // Al desmontar, el `removeChannel` del cleanup dispara `CLOSED`. Sin
@@ -713,10 +770,14 @@ export function useInboxRealtime({
             // Solo es "recuperación" si antes ya habíamos estado conectados y
             // nos caímos. El primer SUBSCRIBED de la sesión no recarga nada:
             // la bandeja acaba de cargar el hilo por su cuenta.
-            if (wasConnected) {
+            //
+            // Excepción: el primer SUBSCRIBED de un canal nuevo por cambio de
+            // hotel sí recarga, para cubrir el hueco entre canal viejo y nuevo.
+            if (wasConnected || everSubscribedRef.current) {
               onRecoveredRef.current?.();
             }
             wasConnected = true;
+            everSubscribedRef.current = true;
           } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
             // La librería reintenta el join sola con backoff. Mientras dure eso
             // el estado honesto es "reconectando", no "actualiza a mano".
@@ -764,5 +825,5 @@ export function useInboxRealtime({
         }
       }
     };
-  }, []);
+  }, [channelHotelId]);
 }
