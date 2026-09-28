@@ -25,6 +25,16 @@ test("super_admin, manager y recepcionista conservan todo el inbox actual", () =
   }
 });
 
+test("historial y queja reciente: por ahora SOLO super_admin", () => {
+  assert.equal(can("super_admin", "verHistorialConversacion"), true);
+  for (const role of ["manager", "recepcionista", "operativo", null, "", "superadmin", "Super_admin"]) {
+    assert.equal(can(role, "verHistorialConversacion"), false, `${String(role)} no debería tenerla`);
+  }
+  // La unión de membresías no la regala: solo aparece con un super_admin real.
+  assert.equal(canAny(["manager", "recepcionista"], "verHistorialConversacion"), false);
+  assert.equal(canAny(["recepcionista", "super_admin"], "verHistorialConversacion"), true);
+});
+
 test("operativo SOLO ve Solicitudes", () => {
   assert.equal(can("operativo", "verSolicitudes"), true);
   assert.equal(can("operativo", "verConversacionesHuespedes"), false);
@@ -126,4 +136,5 @@ test("solo operativos: cero acceso a datos de huéspedes", () => {
   assert.equal(caps.enviarMensajes, false);
   assert.equal(caps.verReservas, false);
   assert.equal(caps.verSolicitudes, true);
+  assert.equal(caps.verHistorialConversacion, false);
 });

@@ -40,7 +40,22 @@ export type Capability =
   /** Pestaña Reservas: cotizaciones y confirmación de reservas. */
   | "verReservas"
   /** Pestaña Solicitudes: tickets de servicio (`service_tickets`). */
-  | "verSolicitudes";
+  | "verSolicitudes"
+  /**
+   * Clasificación automática de la conversación (`conversation_labels`): el
+   * distintivo "Queja reciente" en la fila y el bloque "Historial" de la ficha.
+   *
+   * **Hoy solo la tiene `super_admin`** (decisión de producto del 2026-09-28,
+   * por unas dos semanas, igual que la pestaña Conversaciones del dashboard).
+   * La etiqueta sale de un modelo y conviene mirarla antes de mostrársela a
+   * recepción. Abrírsela a `manager` y `recepcionista` es cambiar dos `false`
+   * por `true` en la matriz de abajo: la bandeja, el endpoint y la ficha ya
+   * cascadean solos.
+   *
+   * Es dato de huésped (está en `CAPACIDADES_DE_HUESPED`): el `operativo` no la
+   * tiene nunca y el recorte de hoteles es el de `guestDataHotelIds`.
+   */
+  | "verHistorialConversacion";
 
 export type CapabilityMap = Readonly<Record<Capability, boolean>>;
 
@@ -49,6 +64,7 @@ const NINGUNA: CapabilityMap = {
   enviarMensajes: false,
   verReservas: false,
   verSolicitudes: false,
+  verHistorialConversacion: false,
 };
 
 const TODAS: CapabilityMap = {
@@ -56,6 +72,7 @@ const TODAS: CapabilityMap = {
   enviarMensajes: true,
   verReservas: true,
   verSolicitudes: true,
+  verHistorialConversacion: true,
 };
 
 /**
@@ -67,13 +84,16 @@ const TODAS: CapabilityMap = {
  */
 const CAPACIDADES: Readonly<Record<HotelRole, CapabilityMap>> = {
   super_admin: TODAS,
-  manager: TODAS,
-  recepcionista: TODAS,
+  // `verHistorialConversacion` en `false` mientras dura la revisión de
+  // super_admin. Abrirlo = poner `true` en estas dos filas.
+  manager: { ...TODAS, verHistorialConversacion: false },
+  recepcionista: { ...TODAS, verHistorialConversacion: false },
   operativo: {
     verConversacionesHuespedes: false,
     enviarMensajes: false,
     verReservas: false,
     verSolicitudes: true,
+    verHistorialConversacion: false,
   },
 };
 
@@ -116,6 +136,7 @@ export function capabilitiesForRoles(roles: readonly unknown[]): CapabilityMap {
       enviarMensajes: acc.enviarMensajes || caps.enviarMensajes,
       verReservas: acc.verReservas || caps.verReservas,
       verSolicitudes: acc.verSolicitudes || caps.verSolicitudes,
+      verHistorialConversacion: acc.verHistorialConversacion || caps.verHistorialConversacion,
     };
   }, NINGUNA);
 }

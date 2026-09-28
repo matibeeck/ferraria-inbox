@@ -6,14 +6,27 @@ import type { SupabaseClient, User } from "@supabase/supabase-js";
 import { resolveTenantContext } from "../inbox-tenant.ts";
 import { capabilitiesForRole, HOTEL_ROLES, type Capability } from "../permissions.ts";
 import { INBOX_PATH, SOLICITUDES_PATH } from "../routes.ts";
-import { CAPACIDADES_DE_HUESPED, decideCapability, pageRedirectFor } from "./capability-gate.ts";
+import {
+  CAPACIDADES_DE_HUESPED,
+  decideCapability,
+  decideRowOwnership,
+  pageRedirectFor,
+} from "./capability-gate.ts";
 
 const TODAS: Capability[] = [
   "verConversacionesHuespedes",
   "enviarMensajes",
   "verReservas",
   "verSolicitudes",
+  "verHistorialConversacion",
 ];
+
+/**
+ * Capacidades que hoy solo tiene super_admin (revisión de ~2 semanas). Cuando
+ * se abran a manager y recepcionista, se sacan de acá y el test de "los demás
+ * roles pasan" las vuelve a cubrir solo.
+ */
+const SOLO_SUPER_ADMIN: Capability[] = ["verHistorialConversacion"];
 
 /** Cliente falso mínimo: `hotel_users` y `hotels`, nada más. */
 function fakeSupabase(memberships: Array<{ hotel_id: string; role: string | null }>) {
@@ -82,11 +95,57 @@ test("gate de endpoint: los demás roles pasan y recortan a sus hoteles de hués
       { id: `u-${role}-gate` } as User
     );
     for (const cap of CAPACIDADES_DE_HUESPED) {
+      if (SOLO_SUPER_ADMIN.includes(cap)) continue;
       const decision = decideCapability(tenant, cap);
       assert.equal(decision.allowed, true, `${role} debería tener ${cap}`);
       assert.deepEqual(decision.hotelIds, ["h-b"]);
     }
   }
+});
+
+test("historial y queja reciente: sin la capacidad → 403 (todos menos super_admin)", async () => {
+  for (const role of ["manager", "recepcionista", "operativo"]) {
+    const tenant = await resolveTenantContext(
+      fakeSupabase([{ hotel_id: "h-a", role }]),
+      { id: `u-${role}-historial` } as User
+    );
+    const decision = decideCapability(tenant, "verHistorialConversacion");
+    assert.equal(decision.allowed, false, `${role} no debería ver el historial`);
+    assert.deepEqual(decision.hotelIds, []);
+  }
+});
+
+test("historial: es dato de huésped, así que recorta a guestDataHotelIds", () => {
+  assert.equal(CAPACIDADES_DE_HUESPED.has("verHistorialConversacion"), true);
+  const decision = decideCapability(
+    {
+      capabilities: capabilitiesForRole("super_admin"),
+      allowedHotelIds: ["h-a", "h-b"],
+      guestDataHotelIds: ["h-a"],
+    },
+    "verHistorialConversacion"
+  );
+  assert.deepEqual(decision, { allowed: true, hotelIds: ["h-a"] });
+});
+
+test("aislamiento: una conversación de otro hotel → 403, aunque tenga la capacidad", () => {
+  // El día que se abra a recepción, una recepcionista del hotel A pidiendo el
+  // historial de una conversación del hotel B tiene que rebotar.
+  const tenant = {
+    capabilities: { ...capabilitiesForRole("recepcionista"), verHistorialConversacion: true },
+    allowedHotelIds: ["h-a"],
+    guestDataHotelIds: ["h-a"],
+  };
+  const gate = decideCapability(tenant, "verHistorialConversacion");
+  assert.equal(gate.allowed, true);
+
+  assert.deepEqual(decideRowOwnership({ hotel_id: "h-b" }, gate.hotelIds), { allowed: false, status: 403 });
+  assert.deepEqual(decideRowOwnership({ hotel_id: null }, gate.hotelIds), { allowed: false, status: 403 });
+  assert.deepEqual(decideRowOwnership(null, gate.hotelIds), { allowed: false, status: 404 });
+  assert.deepEqual(decideRowOwnership({ hotel_id: " h-a " }, gate.hotelIds), {
+    allowed: true,
+    hotelId: "h-a",
+  });
 });
 
 test("gate de endpoint: rol desconocido o null → rechazado en todo", async () => {

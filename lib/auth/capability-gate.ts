@@ -22,6 +22,7 @@ export const CAPACIDADES_DE_HUESPED: ReadonlySet<Capability> = new Set<Capabilit
   "verConversacionesHuespedes",
   "enviarMensajes",
   "verReservas",
+  "verHistorialConversacion",
 ]);
 
 /** Lo mínimo del `TenantContext` que hace falta para decidir. */
@@ -61,4 +62,29 @@ export function decideCapability(tenant: GateTenant, capability: Capability): Ca
 export function pageRedirectFor(capabilities: CapabilityMap, capability: Capability): string | null {
   if (capabilities[capability]) return null;
   return landingPathFor(capabilities);
+}
+
+export type RowOwnershipDecision =
+  | { allowed: true; hotelId: string }
+  | { allowed: false; status: 403 | 404 };
+
+/**
+ * ¿La fila (conversación, ticket, …) es de un hotel que este endpoint puede
+ * tocar? Es la decisión de `assertRowInAllowedHotel`, sacada acá para poder
+ * probarla con `node --test`.
+ *
+ * - Sin fila → 404.
+ * - Fila sin `hotel_id` o de un hotel fuera de la lista → 403. El 403 no dice
+ *   de qué hotel es: solo que no es tuyo.
+ * - Si pasa, devuelve el `hotel_id` REAL de la fila, que es el que se usa como
+ *   filtro en las consultas siguientes (nunca el que mandó el cliente).
+ */
+export function decideRowOwnership(
+  row: { hotel_id?: unknown } | null | undefined,
+  allowedHotelIds: readonly string[]
+): RowOwnershipDecision {
+  if (!row) return { allowed: false, status: 404 };
+  const hotelId = row.hotel_id != null ? String(row.hotel_id).trim() : "";
+  if (!hotelId || !allowedHotelIds.includes(hotelId)) return { allowed: false, status: 403 };
+  return { allowed: true, hotelId };
 }

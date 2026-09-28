@@ -11,6 +11,7 @@ import {
 } from "@/lib/inbox-tenant";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
 import { requireCapability } from "@/lib/auth/require-capability";
+import { decideRowOwnership } from "@/lib/auth/capability-gate";
 import type { Capability } from "@/lib/permissions";
 import { WUBBY_TABLE } from "@/lib/wubby-schema";
 
@@ -131,22 +132,20 @@ export async function assertRowInAllowedHotel(
       hotelId: null,
     };
   }
-  if (!data) {
+  // Decisión pura y testeada en `capability-gate.ts`: mismas respuestas que
+  // antes (404 sin fila, 403 fuera de los hoteles permitidos).
+  const decision = decideRowOwnership(data, allowedHotelIds);
+  if (!decision.allowed) {
     return {
-      response: NextResponse.json({ error: "Recurso no encontrado" }, { status: 404 }),
+      response:
+        decision.status === 404
+          ? NextResponse.json({ error: "Recurso no encontrado" }, { status: 404 })
+          : NextResponse.json({ error: "No autorizado para este hotel" }, { status: 403 }),
       hotelId: null,
     };
   }
 
-  const hotelId = data.hotel_id != null ? String(data.hotel_id).trim() : "";
-  if (!hotelId || !allowedHotelIds.includes(hotelId)) {
-    return {
-      response: NextResponse.json({ error: "No autorizado para este hotel" }, { status: 403 }),
-      hotelId: null,
-    };
-  }
-
-  return { response: null, hotelId };
+  return { response: null, hotelId: decision.hotelId };
 }
 
 /** Alias conveniente de `assertRowInAllowedHotel` para la tabla `conversations`. */
