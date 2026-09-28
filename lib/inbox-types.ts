@@ -301,4 +301,15 @@ export interface Conversation {
    * pregunta: quién tiene el control de la conversación.
    */
   ticketBadge?: InboxTicketBadge | null;
+  /**
+   * `true` si algún tramo de esta conversación que terminó en los últimos 7
+   * días quedó clasificado como queja (`conversation_labels`, solo motivos con
+   * pedido real). Pinta el distintivo "Queja reciente" en la fila.
+   *
+   * NO es una columna de `conversations`: lo deriva `GET /api/inbox`, y solo
+   * para quien tiene `verHistorialConversacion`. Sin polling: se refresca con
+   * las recargas de la bandeja. Realtime no lo trae y el merge
+   * (`{ ...prev, ...cambios }`) lo conserva, igual que `ticketBadge`.
+   */
+  recentComplaint?: boolean;
 }

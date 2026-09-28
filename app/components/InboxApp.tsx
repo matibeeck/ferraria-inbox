@@ -63,8 +63,10 @@ import { readCachedSignedUrl, writeCachedSignedUrl } from "@/lib/signed-media-ca
 import { STAFF_CONTACT_TEMPLATE_NAME } from "@/lib/staff-contacts";
 import { sendWhatsappTemplate } from "@/lib/send-whatsapp-template";
 import { tiempoTranscurrido } from "@/lib/service-tickets";
+import { formatEpisodeDate, type ConversationHistoryEpisode } from "@/lib/conversation-labels";
 import { normalizeColombianWhatsappNumber } from "@/lib/whatsapp-templates";
 import { useAgentTyping } from "@/hooks/useAgentTyping";
+import { useCapabilities } from "@/hooks/useCapabilities";
 import { useConversations } from "@/hooks/useConversations";
 import { useFollowupTimers } from "@/hooks/useFollowupTimers";
 import { useInboxConversationMessages } from "@/hooks/useInboxConversationMessages";
@@ -177,6 +179,33 @@ function BlockedBadge({ className = "" }: { className?: string }) {
       className={`inline-flex shrink-0 items-center rounded-md bg-[#ebe6e0] px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[#6b665e] ring-1 ring-[#d4cdc3] ${className}`}
     >
       Bloqueado
+    </span>
+  );
+}
+
+/**
+ * "Queja reciente": algún tramo de esta conversación que terminó en los
+ * últimos 7 días quedó clasificado como queja (`conversation_labels`).
+ *
+ * Mismo molde que "Bloqueado" y va en el mismo renglón, así que la fila no
+ * cambia de alto. Rojo SUAVE y no sólido a propósito: el rojo lleno ya es
+ * "Sin atender", que es una urgencia de ahora; esto habla de un tramo que ya
+ * cerró (el engine solo etiqueta tramos con 6 h sin mensajes).
+ *
+ * Solo llega en `true` para quien tiene `verHistorialConversacion`: el
+ * servidor ni siquiera lo calcula para los demás.
+ */
+function RecentComplaintBadge({ className = "" }: { className?: string }) {
+  return (
+    <span
+      className={`inline-flex shrink-0 items-center rounded-md px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide ${className}`}
+      style={{
+        background: "var(--red-soft)",
+        color: "var(--accent)",
+        boxShadow: "inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent)",
+      }}
+    >
+      Queja reciente
     </span>
   );
 }
@@ -2593,6 +2622,13 @@ export default function InboxApp() {
    * un aviso, en vez de abrir una conversación que no es la que se pidió.
    */
   const [deepLinkMissing, setDeepLinkMissing] = useState(false);
+  /**
+   * Bloque "Historial" de la ficha. Estricto: mientras `/api/me` no responda
+   * (`null`) NO se pide nada. Al revés que las pestañas, acá no hay nada que
+   * "pintar como siempre": sin el permiso el endpoint responde 403.
+   */
+  const capabilities = useCapabilities();
+  const canSeeConversationHistory = capabilities?.verHistorialConversacion === true;
   const [activeHotelId, setActiveHotelId] = useState<string | null>(() => readStoredActiveHotelId());
   // Antes de `useConversations`: Realtime le avisa a los timers cuando cambia la
   // cotización o el seguimiento de una conversación.
@@ -4815,6 +4851,8 @@ export default function InboxApp() {
                 está hablando, no un estado de la conversación. */}
             <ChannelBadge channel={c.channel} />
             {c.blocked && <BlockedBadge className="shrink-0" />}
+            {/* Solo en la fila de huésped: en staff no hay clasificación. */}
+            {c.recentComplaint === true && <RecentComplaintBadge />}
             <span className="ibx-mono ml-auto shrink-0" style={{ fontSize: 12, color: "var(--text-secondary)" }}>
               {c.lastMessageAt}
             </span>
@@ -6275,6 +6313,7 @@ export default function InboxApp() {
               resolvingRequest={resolvingRequest}
               pendingAction={pendingAction}
               activeHotelName={activeHotelName}
+              canSeeHistory={canSeeConversationHistory}
             />
           )}
         </aside>
@@ -6307,6 +6346,7 @@ export default function InboxApp() {
               resolvingRequest={resolvingRequest}
               pendingAction={pendingAction}
               activeHotelName={activeHotelName}
+              canSeeHistory={canSeeConversationHistory}
             />
           </div>
         </div>
@@ -6524,6 +6564,121 @@ function PanelCard({
   );
 }
 
+type ConversationHistoryState =
+  | { kind: "loading" }
+  | { kind: "error" }
+  | { kind: "ok"; episodes: ConversationHistoryEpisode[]; nowMs: number };
+
+/**
+ * Bloque "Historial": los últimos 3 tramos ya cerrados y clasificados de la
+ * conversación, con fecha (hora Colombia), motivo y resultado.
+ *
+ * El tramo EN CURSO nunca aparece: el engine solo etiqueta un tramo cuando
+ * lleva 6 h sin mensajes. Por eso el texto de vacío lo dice en pantalla, en
+ * vez de dejar que parezca que falta algo.
+ *
+ * Si falla, se queda en un aviso gris dentro del bloque: el resto de la ficha
+ * no se entera.
+ */
+function ConversationHistoryCard({ conversationId }: { conversationId: string }) {
+  const [state, setState] = useState<ConversationHistoryState>({ kind: "loading" });
+
+  useEffect(() => {
+    const controller = new AbortController();
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/inbox/conversation-history?conversationId=${encodeURIComponent(conversationId)}`,
+          { cache: "no-store", signal: controller.signal }
+        );
+        const json = (await res.json()) as {
+          conversationId?: string;
+          episodes?: ConversationHistoryEpisode[];
+        };
+        if (!res.ok || json.conversationId !== conversationId) {
+          setState({ kind: "error" });
+          return;
+        }
+        setState({ kind: "ok", episodes: json.episodes ?? [], nowMs: Date.now() });
+      } catch (e) {
+        if (e instanceof DOMException && e.name === "AbortError") return;
+        setState({ kind: "error" });
+      }
+    })();
+    return () => controller.abort();
+  }, [conversationId]);
+
+  return (
+    <PanelCard className="shrink-0">
+      <div className="mb-2 flex items-center gap-2">
+        <CockpitLabel>Historial</CockpitLabel>
+      </div>
+      {state.kind === "loading" && (
+        <p className="text-[12.5px]" style={{ color: "var(--text-secondary)" }} role="status">
+          Cargando historial…
+        </p>
+      )}
+      {state.kind === "error" && (
+        <p className="text-[12.5px]" style={{ color: "var(--text-secondary)" }}>
+          No se pudo cargar el historial. Vuelve a abrir la conversación para intentarlo otra vez.
+        </p>
+      )}
+      {state.kind === "ok" && state.episodes.length === 0 && (
+        <p className="text-[12.5px] leading-relaxed" style={{ color: "var(--text-secondary)" }}>
+          Todavía no hay conversaciones anteriores clasificadas. La actual se clasifica cuando
+          pasan 6 horas sin mensajes.
+        </p>
+      )}
+      {state.kind === "ok" && state.episodes.length > 0 && (
+        <ul className="m-0 list-none p-0">
+          {state.episodes.map((episode, index) => {
+            const fecha = formatEpisodeDate(episode.startedAt, state.nowMs);
+            return (
+              <li
+                key={`${episode.startedAt ?? "sin-fecha"}-${index}`}
+                className="min-w-0"
+                style={{
+                  padding: "8px 0",
+                  borderTop: index === 0 ? "none" : "1px solid var(--border-soft)",
+                }}
+              >
+                <div className="flex items-center gap-2">
+                  {fecha && (
+                    <span className="ibx-mono" style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+                      {fecha}
+                    </span>
+                  )}
+                  {episode.queja && (
+                    <span
+                      className="inline-flex shrink-0 items-center rounded-md px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide"
+                      style={{
+                        background: "var(--red-soft)",
+                        color: "var(--accent)",
+                        boxShadow: "inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent)",
+                      }}
+                    >
+                      Queja
+                    </span>
+                  )}
+                </div>
+                <p
+                  className="m-0 mt-0.5 break-words text-[13px] font-semibold"
+                  style={{ color: "var(--text-primary)" }}
+                >
+                  {episode.motivo}
+                </p>
+                <p className="m-0 break-words text-[12.5px]" style={{ color: "var(--text-secondary)" }}>
+                  {episode.resultado}
+                </p>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </PanelCard>
+  );
+}
+
 /**
  * Interruptor de FerrarIA. No decide nada por su cuenta: encendido llama a
  * "reactivar IA" y apagado a "tomar control humano", las mismas dos acciones
@@ -6654,6 +6809,7 @@ function GuestPanelContent({
   resolvingRequest,
   pendingAction,
   activeHotelName,
+  canSeeHistory,
 }: {
   conversation: Conversation;
   onTakeHuman: () => void;
@@ -6668,6 +6824,8 @@ function GuestPanelContent({
   pendingAction: null | "human" | "ai" | "complete" | "reopen";
   /** Nombre del hotel activo. `null` cuando no se pudo resolver: el renglón se omite. */
   activeHotelName: string | null;
+  /** `verHistorialConversacion`: pinta el bloque "Historial". */
+  canSeeHistory: boolean;
 }) {
   const { guest } = conversation;
   /**
@@ -7080,6 +7238,12 @@ function GuestPanelContent({
             <p className="ibx-mono text-[12px]" style={{ color: "var(--text-secondary)" }}>Sin resumen aún.</p>
           )}
         </PanelCard>
+      )}
+
+      {/* 5 · Historial. `key` por conversación: al cambiar de hilo el bloque
+          arranca de cero en vez de mostrar un instante los tramos del anterior. */}
+      {!isStaff && canSeeHistory && (
+        <ConversationHistoryCard key={conversation.id} conversationId={conversation.id} />
       )}
 
       {!notesAreDefault && (

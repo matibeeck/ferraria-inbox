@@ -34,6 +34,7 @@ const ESPERADO: Record<string, Record<string, string | null>> = {
   },
   "inbox/messages": { GET: 'requireCapability(supabase, auth.user, "verConversacionesHuespedes")' },
   "inbox/ticket-badges": { GET: 'requireCapability(supabase, auth.user, "verConversacionesHuespedes")' },
+  "inbox/conversation-history": { GET: 'requireCapability(supabase, auth.user, "verHistorialConversacion")' },
   "inbox/message-by-temp-id": { GET: 'capability: "enviarMensajes"' },
   "media/signed-url": { GET: 'requireCapability(supabase, auth.user, "verConversacionesHuespedes")' },
   "message-templates": { GET: 'requireCapability(supabase, auth.user, "enviarMensajes")' },

@@ -23,6 +23,8 @@ import { requireCapability } from "@/lib/auth/require-capability";
 import { assertConversationInHotel } from "@/lib/auth/require-hotel";
 import { STAFF_CONTACTS_TABLE, normalizeStaffPhone } from "@/lib/staff-contacts";
 import { fetchTicketBadges, markTicketBadges } from "@/lib/inbox-ticket-badges-server";
+import { markRecentComplaints, recentComplaintsFor } from "@/lib/conversation-labels";
+import { fetchRecentComplaintConversationIds } from "@/lib/conversation-labels-server";
 import type { Conversation } from "@/lib/inbox-types";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
 import {
@@ -353,7 +355,7 @@ export async function GET(request: Request) {
         });
       }
 
-      const [rpcResult, staffPhones, ticketBadges] = await Promise.all([
+      const [rpcResult, staffPhones, ticketBadges, recentComplaints] = await Promise.all([
         supabase.rpc(SEARCH_CONVERSATIONS_RPC, {
           p_hotel_id: activeHotelId,
           p_q: searchTerm,
@@ -365,6 +367,10 @@ export async function GET(request: Request) {
         // Mismo argumento para el badge de solicitud: buscar a un huésped no
         // puede esconder que tiene algo pendiente sin atender.
         fetchTicketBadges(supabase, activeHotelId),
+        // "Queja reciente": mismo argumento. Solo con la capacidad.
+        recentComplaintsFor(gate.tenant.capabilities, () =>
+          fetchRecentComplaintConversationIds(supabase, activeHotelId)
+        ),
       ]);
 
       if (rpcResult.error) {
@@ -402,6 +408,7 @@ export async function GET(request: Request) {
       const conversations = buildInboxConversations(convRows, lastMessageByConversationId);
       markStaffConversations(conversations, staffPhones);
       markTicketBadges(conversations, ticketBadges);
+      markRecentComplaints(conversations, recentComplaints);
       conversations.sort((a, b) => {
         return getConversationDisplayActivityMs(b) - getConversationDisplayActivityMs(a);
       });
@@ -464,15 +471,22 @@ export async function GET(request: Request) {
     // Independientes entre sí: el GET cuesta un round trip, no cuatro. Sin
     // `count: exact`: contar la tabla en cada carga era la consulta más cara del
     // GET y solo alimentaba un denominador.
-    const [pageResult, protectedResult, staffPhones, ticketBadges] = await Promise.all([
-      pageRequest,
-      protectedRequest,
-      // Contactos de staff del hotel activo, para el badge de la bandeja.
-      fetchActiveStaffPhones(supabase, activeHotelId),
-      // Solicitudes de servicio sin resolver, para el badge de la fila. UNA
-      // consulta por GET, no una por conversación.
-      fetchTicketBadges(supabase, activeHotelId),
-    ]);
+    const [pageResult, protectedResult, staffPhones, ticketBadges, recentComplaints] =
+      await Promise.all([
+        pageRequest,
+        protectedRequest,
+        // Contactos de staff del hotel activo, para el badge de la bandeja.
+        fetchActiveStaffPhones(supabase, activeHotelId),
+        // Solicitudes de servicio sin resolver, para el badge de la fila. UNA
+        // consulta por GET, no una por conversación.
+        fetchTicketBadges(supabase, activeHotelId),
+        // "Queja reciente" (`conversation_labels`). UNA consulta por hotel y
+        // por GET, sin polling: se refresca con las recargas de la bandeja.
+        // Sin la capacidad no se consulta nada; si falla, conjunto vacío.
+        recentComplaintsFor(gate.tenant.capabilities, () =>
+          fetchRecentComplaintConversationIds(supabase, activeHotelId)
+        ),
+      ]);
 
     if (pageResult.error) {
       return upstreamError("conversations", pageResult.error);
@@ -526,6 +540,7 @@ export async function GET(request: Request) {
     const conversations = buildInboxConversations(convRows, lastMessageByConversationId);
     markStaffConversations(conversations, staffPhones);
     markTicketBadges(conversations, ticketBadges);
+    markRecentComplaints(conversations, recentComplaints);
     conversations.sort((a, b) => {
       return getConversationDisplayActivityMs(b) - getConversationDisplayActivityMs(a);
     });
