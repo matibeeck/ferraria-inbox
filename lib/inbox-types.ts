@@ -270,6 +270,11 @@ export interface Conversation {
    */
   request: string | null;
   /**
+   * Copia de `conversations.handoff_reason`: por qué el engine le pasó el caso a
+   * recepción. Se muestra con `handoffReasonLabel` (lib/handoff-state.ts).
+   */
+  handoffReason?: string | null;
+  /**
    * `true` cuando el teléfono del hilo está en `staff_contacts` (activo) del
    * hotel. NO es una columna de `conversations`: lo deriva `GET /api/inbox`
    * cruzando teléfonos normalizados, así que Realtime nunca lo trae.

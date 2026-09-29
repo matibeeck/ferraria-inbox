@@ -1028,6 +1028,7 @@ function buildConversationFromRow(
     blocked: readBoolCol(cr.blocked, false),
     blockedAt: cr.blocked_at,
     request: requestValue,
+    handoffReason: cr.handoff_reason ?? null,
     lastMessagePreview: truncateListPreview(parts.lastPreview),
     lastMessageAt: parts.lastMessageAt,
     lastActivityIso: parts.lastActivityIso,
@@ -1246,6 +1247,9 @@ export function applyConversationRowPatch(
     // bandeja ya sin `messages`, se quedaría bloqueado hasta el próximo refetch.
     lastGuestMessageAt: row.last_guest_message_at ?? null,
     request: requestValue,
+    // Mismo criterio que el canal: este merge es el único punto que recibe la
+    // fila fresca por Realtime. Si la fila no trae la columna, se conserva.
+    handoffReason: row.handoff_reason !== undefined ? row.handoff_reason : existing.handoffReason ?? null,
     unreadCount: readUnreadCount(row.unread_count),
     operationalStatus,
     controlMode,

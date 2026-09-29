@@ -23,6 +23,9 @@ export const CONVERSATION_SELECT_COLUMNS = [
   "blocked",
   "blocked_at",
   "request",
+  // Motivo del traspaso a recepción: lo escribe el engine en cada handoff y se
+  // muestra en el encabezado del chat mientras la solicitud esté abierta.
+  "handoff_reason",
   "unread_count",
   "last_guest_message_at",
   "ai_reactivated_at",
@@ -61,6 +64,11 @@ export type ConversationDbRow = {
    * - null / otro valor: caso sin pendiente activo
    */
   request: string | null;
+  /**
+   * Motivo del traspaso a recepción, en español (src/pipeline/handoffReasons.ts
+   * del engine). OPCIONAL: las filas armadas a mano en el cliente no lo traen.
+   */
+  handoff_reason?: string | null;
   unread_count: number | null;
   /**
    * OPCIONAL a propósito: queda fuera de `CONVERSATION_SELECT_COLUMNS` (ver

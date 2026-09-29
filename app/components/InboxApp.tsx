@@ -81,6 +81,7 @@ import { readStoredActiveHotelId, writeStoredActiveHotelId } from "@/lib/active-
 import { StartConversationModal } from "./StartConversationModal";
 import { WhatsappText, stripWhatsappMarkup } from "./WhatsappText";
 import { StaffContactsModal } from "./StaffContactsModal";
+import { handoffReasonLabel, isConsultMode, needsReceptionAttention } from "@/lib/handoff-state";
 
 type StatusFilter = "all" | "unread" | "ai_active" | "requires_attention" | "closed";
 
@@ -400,7 +401,7 @@ function isConversationReplyBlocked(conversation: Conversation | null | undefine
 }
 
 /** Estado visible de la conversación en la cola (una sola etiqueta clara). */
-type StatusVariant = "pending" | "attention" | "human" | "ia" | "done";
+type StatusVariant = "pending" | "consult" | "attention" | "human" | "ia" | "done";
 
 /** Punto de color sólido (token D). */
 function Dot({ size = 7, color }: { size?: number; color: string }) {
@@ -423,6 +424,10 @@ function Dot({ size = 7, color }: { size?: number; color: string }) {
 /** Glifo, palabra y color de cada estado, bajo el preview de la fila (spec 4.3). */
 const GUEST_STATUS_PREFIX: Record<StatusVariant, { glyph: string; label: string; color: string }> = {
   pending: { glyph: "●", label: "Pendiente", color: "var(--accent)" },
+  // Solicitud abierta con recepción mientras el agente sigue atendiendo (modo
+  // consulta del engine). Mismo glifo que "Pendiente" —hay algo que revisar—,
+  // en dorado para que no se confunda con una pausa total.
+  consult: { glyph: "●", label: "En consulta · IA atiende", color: "var(--gold)" },
   attention: { glyph: "●", label: "Atención", color: "var(--accent)" },
   human: { glyph: "●", label: "Humano", color: "var(--gold)" },
   ia: { glyph: "✦", label: "IA", color: "var(--live)" },
@@ -3245,7 +3250,11 @@ export default function InboxApp() {
     const all = base.length;
     const unread = base.filter((c) => c.unreadCount > 0).length;
     const ai_active = base.filter((c) => c.operationalStatus === "ai_active").length;
-    const requires_attention = base.filter((c) => c.operationalStatus === "requires_attention").length;
+    // "Atención" = lo que ya iba (pausa total, bloqueo, control humano) MÁS toda
+    // solicitud abierta con recepción, aunque la IA siga activa (modo consulta
+    // del engine). Mismo criterio que el filtro de abajo: si divergen, el número
+    // del chip no coincide con las filas que muestra.
+    const requires_attention = base.filter(needsReceptionAttention).length;
     const closed = base.filter((c) => c.operationalStatus === "closed").length;
     return { all, unread, ai_active, requires_attention, closed };
   }, [conversations, search.injectedIds]);
@@ -3291,7 +3300,7 @@ export default function InboxApp() {
     } else if (statusFilter === "ai_active") {
       list = list.filter((c) => c.operationalStatus === "ai_active");
     } else if (statusFilter === "requires_attention") {
-      list = list.filter((c) => c.operationalStatus === "requires_attention");
+      list = list.filter(needsReceptionAttention);
     } else if (statusFilter === "closed") {
       list = list.filter((c) => c.operationalStatus === "closed");
     }
@@ -4771,7 +4780,9 @@ export default function InboxApp() {
     const isPending = c.request === "pending";
     const isHumanHandled = c.controlMode === "human" && c.operationalStatus !== "closed";
     const statusVariant: StatusVariant = isPending
-      ? "pending"
+      ? isConsultMode(c)
+        ? "consult"
+        : "pending"
       : c.operationalStatus === "closed"
         ? "done"
         : isHumanHandled
@@ -5689,6 +5700,15 @@ export default function InboxApp() {
                         <Dot color="var(--accent)" />
                         Requiere atención humana
                       </span>
+                    ) : isConsultMode(selected) ? (
+                      /* Modo consulta: recepción tiene algo que revisar, pero el
+                         agente sigue contestando. Si la recepcionista responde
+                         desde acá, el engine pasa la conversación a pausa total
+                         y este estado cambia solo por Realtime. */
+                      <span className="inline-flex items-center gap-1.5" style={{ fontSize: 12.5, fontWeight: 600, color: "var(--gold)" }}>
+                        <Dot color="var(--gold)" />
+                        En consulta con recepción · el agente sigue atendiendo
+                      </span>
                     ) : selected.operationalStatus === "ai_active" ? (
                       <span className="inline-flex items-center gap-1.5" style={{ fontSize: 12.5, fontWeight: 600, color: "var(--live)" }}>
                         <Dot color="var(--live)" />
@@ -5727,6 +5747,14 @@ export default function InboxApp() {
                       </span>
                     )}
                   </div>
+                  {/* Por qué el engine le pasó el caso a recepción, en texto
+                      visible (no tooltip) mientras la solicitud siga abierta.
+                      Vale para los dos modos: pausa total y consulta. */}
+                  {!selectedIsStaff && selected.request === "pending" && handoffReasonLabel(selected.handoffReason) && (
+                    <p className="mt-0.5 truncate" style={{ fontSize: 12, color: "var(--text-secondary)" }}>
+                      Motivo: {handoffReasonLabel(selected.handoffReason)}
+                    </p>
+                  )}
                 </div>
                 {selectedIsStaff ? (
                   /* Encabezado de Staff (spec 5.3): la acción principal a la
