@@ -81,7 +81,7 @@ import { readStoredActiveHotelId, writeStoredActiveHotelId } from "@/lib/active-
 import { StartConversationModal } from "./StartConversationModal";
 import { WhatsappText, stripWhatsappMarkup } from "./WhatsappText";
 import { StaffContactsModal } from "./StaffContactsModal";
-import { handoffReasonLabel, isConsultMode, needsReceptionAttention } from "@/lib/handoff-state";
+import { handoffReasonLabel, hasOpenRequest, isConsultMode, needsReceptionAttention } from "@/lib/handoff-state";
 
 type StatusFilter = "all" | "unread" | "ai_active" | "requires_attention" | "closed";
 
@@ -3250,9 +3250,9 @@ export default function InboxApp() {
     const all = base.length;
     const unread = base.filter((c) => c.unreadCount > 0).length;
     const ai_active = base.filter((c) => c.operationalStatus === "ai_active").length;
-    // "Atención" = lo que ya iba (pausa total, bloqueo, control humano) MÁS toda
-    // solicitud abierta con recepción, aunque la IA siga activa (modo consulta
-    // del engine). Mismo criterio que el filtro de abajo: si divergen, el número
+    // "Atención" = lo que ya iba (pausa total, bloqueo, control humano) MÁS las
+    // consultas del engine (`request='consult'`, IA activa). Una 'pending' con
+    // la IA activa no suma. Mismo criterio que el filtro de abajo: si divergen, el número
     // del chip no coincide con las filas que muestra.
     const requires_attention = base.filter(needsReceptionAttention).length;
     const closed = base.filter((c) => c.operationalStatus === "closed").length;
@@ -4334,6 +4334,8 @@ export default function InboxApp() {
                 // (`buildReactivateAiFields`); sin esto el contador parpadeaba
                 // hasta que llegaba la fila.
                 unreadCount: 0,
+                // También cierra la solicitud con recepción (`request: null`).
+                request: null,
                 operationalStatus: "ai_active",
               }
             : c
@@ -4612,7 +4614,9 @@ export default function InboxApp() {
   const resolveRequest = async () => {
     if (!selectedId) return;
     const conv = conversations.find((c) => c.id === selectedId);
-    if (!conv || conv.request !== "pending") return;
+    if (!conv || !hasOpenRequest(conv)) return;
+    // Si el PATCH falla se devuelve el valor que tenía ('pending' o 'consult').
+    const previousRequest = conv.request;
     setActionError(null);
     setResolvingRequest(true);
 
@@ -4629,7 +4633,7 @@ export default function InboxApp() {
       const j = (await res.json().catch(() => ({}))) as InboxPatchResponse;
       if (!res.ok) {
         setConversations((prev) =>
-          prev.map((c) => (c.id === selectedId ? { ...c, request: "pending" } : c))
+          prev.map((c) => (c.id === selectedId ? { ...c, request: previousRequest } : c))
         );
         setActionError(j.error ?? "No se pudo marcar el asunto como resuelto");
         return;
@@ -4637,7 +4641,7 @@ export default function InboxApp() {
       applyServerConversationRow(j.conversation);
     } catch {
       setConversations((prev) =>
-        prev.map((c) => (c.id === selectedId ? { ...c, request: "pending" } : c))
+        prev.map((c) => (c.id === selectedId ? { ...c, request: previousRequest } : c))
       );
       setActionError("Error de red al marcar el asunto como resuelto");
     } finally {
@@ -4777,7 +4781,8 @@ export default function InboxApp() {
     const active = c.id === selectedId;
     const hasUnread = c.unreadCount > 0;
     const unreadLabel = c.unreadCount > 99 ? "99+" : String(c.unreadCount);
-    const isPending = c.request === "pending";
+    // 'consult' con needs_human (o IA apagada) se ve como pausa total: "Pendiente".
+    const isPending = hasOpenRequest(c);
     const isHumanHandled = c.controlMode === "human" && c.operationalStatus !== "closed";
     const statusVariant: StatusVariant = isPending
       ? isConsultMode(c)
@@ -5750,7 +5755,7 @@ export default function InboxApp() {
                   {/* Por qué el engine le pasó el caso a recepción, en texto
                       visible (no tooltip) mientras la solicitud siga abierta.
                       Vale para los dos modos: pausa total y consulta. */}
-                  {!selectedIsStaff && selected.request === "pending" && handoffReasonLabel(selected.handoffReason) && (
+                  {!selectedIsStaff && hasOpenRequest(selected) && handoffReasonLabel(selected.handoffReason) && (
                     <p className="mt-0.5 truncate" style={{ fontSize: 12, color: "var(--text-secondary)" }}>
                       Motivo: {handoffReasonLabel(selected.handoffReason)}
                     </p>
@@ -6893,7 +6898,7 @@ function GuestPanelContent({
   const realTags = guest.tags.filter(isRealPropertyValue);
   const hasTags = realTags.length > 0;
   const notesAreDefault = guest.internalNotes.startsWith("Sin notas");
-  const isPendingRequest = conversation.request === "pending";
+  const isPendingRequest = hasOpenRequest(conversation);
   const isClosed = conversation.operationalStatus === "closed";
   const actionsBusy = pendingAction !== null || resolvingRequest;
   const aiOn = conversation.aiActive && conversation.controlMode === "ai";

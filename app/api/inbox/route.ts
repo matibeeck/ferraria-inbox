@@ -69,12 +69,14 @@ const CONVERSATIONS_PAGE_SIZE = 30;
  * A propósito MÁS AMPLIO que el chip "Atención" — acá no se clasifica, se
  * garantiza un superconjunto.
  *
- * `request` —no `status`— es la columna donde vive `pending`: el dominio de
+ * `request` —no `status`— es la columna donde viven `pending` (pausa total) y
+ * `consult` (consulta con la IA activa, cuenta para "Atención"): el dominio de
  * `status` es open / completed / human_control. `human_control` va aparte porque
  * `mapOperationalFromConversationRow` lo clasifica como `requires_attention`.
  */
 const PROTECTED_CONVERSATIONS_FILTER = [
   "request.eq.pending",
+  "request.eq.consult",
   "status.eq.human_control",
   "blocked.eq.true",
   "needs_human.eq.true",

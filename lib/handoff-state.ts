@@ -3,12 +3,18 @@
  * lo tiene que ver la bandeja.
  *
  * El engine tiene dos formas de pasarle un caso a recepción:
- *  - PAUSA TOTAL: `needs_human=true` (o `ai_active=false`). La IA se calla y la
+ *  - PAUSA TOTAL: `request='pending'` + `needs_human=true`. La IA se calla y la
  *    conversación ya cae en "Atención" por `operationalStatus`. No cambia.
- *  - CONSULTA ("consultar y seguir", opt-in por hotel): `request='pending'` con
- *    la IA ACTIVA. Recepción tiene que revisar el tema, pero el agente sigue
- *    atendiendo todo lo demás. Sin este módulo esa conversación caía en la
- *    pestaña "IA" y nadie la veía como pendiente.
+ *  - CONSULTA ("consultar y seguir", opt-in por hotel): `request='consult'` con
+ *    la IA ACTIVA y `needs_human=false`. Recepción tiene que revisar el tema,
+ *    pero el agente sigue atendiendo todo lo demás.
+ *
+ * Una `request='pending'` con la IA activa NO es consulta: son solicitudes
+ * viejas que nadie cerró (había ~271 el 2026-09-30). Se ven como antes y no
+ * entran en "Atención".
+ *
+ * Para la base, 'pending' y 'consult' son la misma solicitud abierta (un solo
+ * ciclo); pasar a null la cierra.
  *
  * Lógica pura y sin imports para que la cubra `node --test` sin compilar nada.
  */
@@ -23,20 +29,19 @@ export interface HandoffStateInput {
   operationalStatus: "ai_active" | "requires_attention" | "closed";
 }
 
-/** Solicitud abierta con recepción (en cualquiera de los dos modos). */
-export function hasPendingRequest(c: Pick<HandoffStateInput, "request">): boolean {
-  return c.request === "pending";
+/** Solicitud abierta con recepción, en cualquiera de los dos modos. */
+export function hasOpenRequest(c: Pick<HandoffStateInput, "request">): boolean {
+  return c.request === "pending" || c.request === "consult";
 }
 
 /**
- * Modo consulta: solicitud abierta con la IA atendiendo. Es exactamente lo que
- * deja el engine en ese modo (request pendiente sin `needs_human`). Cualquier
- * señal de control humano —needs_human, IA apagada, `human_control`, bloqueo—
- * la vuelve pausa total, que es como se ve hoy.
+ * Modo consulta: el engine marcó `request='consult'` y la IA sigue atendiendo.
+ * Cualquier señal de control humano —needs_human, IA apagada, `human_control`,
+ * bloqueo— manda sobre la marca y se ve como pausa total.
  */
 export function isConsultMode(c: HandoffStateInput): boolean {
   return (
-    hasPendingRequest(c) &&
+    c.request === "consult" &&
     !c.needsHuman &&
     c.aiActive &&
     !c.blocked &&
@@ -47,12 +52,12 @@ export function isConsultMode(c: HandoffStateInput): boolean {
 
 /**
  * ¿Va en la pestaña y el contador "Atención"? Todo lo que ya iba (pausa total,
- * bloqueo, control humano) MÁS cualquier solicitud abierta con recepción,
- * aunque la IA siga activa. Una conversación cerrada no entra, como hoy.
+ * bloqueo, control humano) MÁS las consultas abiertas. Una `pending` con la IA
+ * activa no entra. Una conversación cerrada no entra, como hoy.
  */
 export function needsReceptionAttention(c: HandoffStateInput): boolean {
   if (c.operationalStatus === "requires_attention") return true;
-  return hasPendingRequest(c) && c.operationalStatus !== "closed";
+  return c.request === "consult" && c.operationalStatus !== "closed";
 }
 
 /**
