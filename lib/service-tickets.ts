@@ -154,6 +154,13 @@ export type ServiceTicket = {
   en_curso_at: string | null;
   resuelto_at: string | null;
   cancelado_at: string | null;
+  /**
+   * Cuándo se le mandó al huésped el aviso automático de "ya fue atendida".
+   * `null` = no se le avisó (desactivado, recepción ya le había escrito, fuera
+   * de la ventana de 24 h, o el envío falló). Opcional para no obligar a los
+   * llamadores viejos a inventar el campo.
+   */
+  guest_notified_at?: string | null;
 };
 
 /** Estado de la fila, tolerante a basura en la columna. Desconocido → `abierto`. */

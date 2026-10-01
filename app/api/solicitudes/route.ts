@@ -7,6 +7,8 @@ import {
   type HotelMembership,
 } from "@/lib/inbox-tenant";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
+import { avisoVisiblePara, type AvisoCierre } from "@/lib/aviso-cierre";
+import { avisarCierreAlHuesped } from "@/lib/aviso-cierre-server";
 import {
   esCambioRedundante,
   esTransicionValida,
@@ -34,7 +36,7 @@ export const dynamic = "force-dynamic";
 const MAX_FILAS = 200;
 
 const TICKET_SELECT =
-  "id, hotel_id, conversation_id, categoria, descripcion, habitacion, estado, created_at, en_curso_at, resuelto_at, cancelado_at";
+  "id, hotel_id, conversation_id, categoria, descripcion, habitacion, estado, created_at, en_curso_at, resuelto_at, cancelado_at, guest_notified_at";
 
 /** Error genérico al cliente; el detalle real solo al log del servidor. */
 function fallo(contexto: string, detalle: unknown, mensaje: string, status = 502) {
@@ -300,13 +302,37 @@ export async function PATCH(request: Request) {
       );
     }
 
-    const actualizada = data as unknown as ServiceTicket;
+    let actualizada = data as unknown as ServiceTicket;
+
+    // Aviso al huésped: SOLO acá, después de un UPDATE efectivo a `resuelto`.
+    // El camino idempotente y el 409 salen antes y nunca avisan, así que dos
+    // tablets tocando "Resolver" a la vez no le mandan dos WhatsApp.
+    // El cierre ya está guardado: el aviso no lo puede revertir ni tumbar.
+    let aviso: AvisoCierre | undefined;
+    if (destino === "resuelto") {
+      const engineEnabled =
+        gate.tenant.hotels.find((hotel) => hotel.id === hotelId)?.engineEnabled === true;
+      const resultado = await avisarCierreAlHuesped({
+        supabase,
+        ticket: actualizada,
+        hotelId,
+        engineEnabled,
+      });
+      // Igual que con `conversation_id`: quien no ve datos de huéspedes no se
+      // entera por el motivo de si recepción ya le escribió o cuándo escribió.
+      aviso = avisoVisiblePara(resultado.aviso, puedeVerConversaciones);
+      if (resultado.guestNotifiedAt) {
+        actualizada = { ...actualizada, guest_notified_at: resultado.guestNotifiedAt };
+      }
+    }
+
     return NextResponse.json({
       ok: true,
       solicitud: {
         ...actualizada,
         conversation_id: puedeVerConversaciones ? actualizada.conversation_id : null,
       },
+      ...(aviso ? { aviso } : {}),
     });
   } catch (e) {
     return fallo("PATCH", e, "No se pudo actualizar la solicitud", 500);
