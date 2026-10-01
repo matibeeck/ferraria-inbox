@@ -6,9 +6,13 @@ import { getSupabaseServerClient } from "@/lib/supabase-server";
 
 export const dynamic = "force-dynamic";
 
+/** Detalle crudo de Supabase y de excepciones solo en desarrollo. */
+const isDev = process.env.NODE_ENV !== "production";
+
 /**
- * Lee `conversation_summaries` con el cliente de servidor (service role o anon,
- * ver `getSupabaseServerClient`). Requiere sesión en el inbox.
+ * Lee `conversation_summaries` con el cliente de servidor (service role, se
+ * salta la RLS). Requiere sesión en el inbox y que la conversación sea de un
+ * hotel permitido.
  */
 export async function GET(request: Request) {
   try {
@@ -30,32 +34,33 @@ export async function GET(request: Request) {
     const ownership = await assertConversationInHotel(supabase, conversationId, allowedHotelIds);
     if (ownership.response) return ownership.response;
 
-    const result = await supabase
+    // Doble candado: además de la conversación ya validada, el resumen tiene
+    // que ser del MISMO hotel. Filtro en el query, sin apoyarse en RLS.
+    const { data, error: supabaseError } = await supabase
       .from("conversation_summaries")
       .select("summary")
       .eq("conversation_id", conversationId)
+      .eq("hotel_id", ownership.hotelId)
       .maybeSingle();
 
-    const { data, error: supabaseError, status, statusText } = result;
+    if (supabaseError) {
+      console.error(
+        "[conversation-summary GET] select",
+        supabaseError.code ?? "sin_code",
+        isDev ? supabaseError.message : ""
+      );
+      return NextResponse.json({ error: "No se pudo cargar el resumen" }, { status: 502 });
+    }
 
-    const payload = {
-      data,
-      supabaseError: supabaseError
-        ? {
-            message: supabaseError.message,
-            code: supabaseError.code,
-            details: supabaseError.details,
-            hint: supabaseError.hint,
-          }
-        : null,
-      supabaseStatus: status,
-      supabaseStatusText: statusText,
-    };
-
-    return NextResponse.json(payload);
+    return NextResponse.json({ data });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Error desconocido";
-    console.error("[conversation-summaries] exception", e);
-    return NextResponse.json({ error: msg }, { status: 500 });
+    console.error(
+      "[conversation-summary GET] error inesperado",
+      isDev ? e : e instanceof Error ? e.name : "unknown"
+    );
+    return NextResponse.json(
+      { error: isDev && e instanceof Error ? e.message : "No se pudo cargar el resumen" },
+      { status: 500 }
+    );
   }
 }

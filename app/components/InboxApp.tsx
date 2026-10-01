@@ -6520,9 +6520,8 @@ async function fetchConversationSummaryFromApi(conversationId: string): Promise<
     `/api/conversation-summary?conversation_id=${encodeURIComponent(conversationId)}`,
     { credentials: "include", cache: "no-store" }
   );
-  const summaryPayload = (await summaryRes.json()) as {
+  const summaryPayload = (await summaryRes.json().catch(() => ({}))) as {
     data?: { summary: string | null } | null;
-    supabaseError?: { message: string; code?: string; details?: string; hint?: string } | null;
     error?: string;
   };
 
@@ -6532,14 +6531,8 @@ async function fetchConversationSummaryFromApi(conversationId: string): Promise<
   if (summaryRes.status === 400) {
     return { kind: "error", message: summaryPayload.error ?? "Parámetros no válidos." };
   }
-  if (summaryRes.status === 500) {
+  if (!summaryRes.ok) {
     return { kind: "error", message: summaryPayload.error ?? "Error al leer el resumen." };
-  }
-  if (summaryPayload.supabaseError) {
-    return {
-      kind: "error",
-      message: "No se pudo cargar el resumen: " + summaryPayload.supabaseError.message,
-    };
   }
   const row = summaryPayload.data;
   if (!row || typeof row.summary !== "string" || !row.summary.trim()) {
