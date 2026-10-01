@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { AppShell } from "@/app/components/AppShell";
 import { readStoredActiveHotelId, writeStoredActiveHotelId } from "@/lib/active-hotel-storage";
+import { mensajeAvisoParaRecepcion } from "@/lib/aviso-cierre";
 import {
   ESTADO_LABEL,
   FILTRO_LABEL,
@@ -75,11 +76,14 @@ export function SolicitudesScreen() {
   const [ocupadoId, setOcupadoId] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
 
-  const avisar = useCallback((mensaje: string, tipo: Toast["tipo"] = "ok") => {
-    const id = Date.now() + Math.random();
-    setToasts((previos) => [...previos, { id, tipo, mensaje }]);
-    window.setTimeout(() => setToasts((previos) => previos.filter((t) => t.id !== id)), 3500);
-  }, []);
+  const avisar = useCallback(
+    (mensaje: string, tipo: Toast["tipo"] = "ok", duracionMs = 3500) => {
+      const id = Date.now() + Math.random();
+      setToasts((previos) => [...previos, { id, tipo, mensaje }]);
+      window.setTimeout(() => setToasts((previos) => previos.filter((t) => t.id !== id)), duracionMs);
+    },
+    []
+  );
 
   const chipActivo = CHIPS.find((c) => c.id === chip) ?? CHIPS[0];
 
@@ -138,9 +142,22 @@ export function SolicitudesScreen() {
   const aplicarCambio = async (ticket: ServiceTicket, nuevoEstado: TicketEstado) => {
     setOcupadoId(ticket.id);
     try {
-      await cambiarEstado(ticket.id, nuevoEstado);
+      const aviso = await cambiarEstado(ticket.id, nuevoEstado);
       if (nuevoEstado === "en_curso") avisar("Solicitud tomada");
-      if (nuevoEstado === "resuelto") avisar("Solicitud resuelta");
+      if (nuevoEstado === "resuelto") {
+        // El cierre ya quedó guardado pase lo que pase con el aviso; por eso el
+        // toast verde va siempre y el resultado del WhatsApp va como segunda
+        // línea propia, más tiempo en pantalla para que alcance a leerse. Solo
+        // un envío fallido va en rojo: es lo único que pide que alguien actúe.
+        avisar("Solicitud resuelta");
+        if (aviso) {
+          avisar(
+            mensajeAvisoParaRecepcion(aviso),
+            aviso.motivo === "envio_fallido" ? "error" : "ok",
+            6000
+          );
+        }
+      }
       if (nuevoEstado === "cancelado") avisar("Solicitud cancelada");
       setCancelando(null);
     } catch (e) {

@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useState, type SVGProps } from "react";
 import { Spinner } from "@/app/components/Spinner";
+import { horaAvisoHuesped } from "@/lib/aviso-cierre";
 import {
   CATEGORIA_LABEL,
   ESTADO_LABEL,
@@ -122,6 +123,7 @@ export function TicketCard({
   const habitacion = ticket.habitacion?.trim();
   const desde = tiempoTranscurrido(ticket.created_at);
   const descripcion = ticket.descripcion?.trim();
+  const horaAviso = estado === "resuelto" ? horaAvisoHuesped(ticket.guest_notified_at) : null;
 
   const puedeTomar = estado === "abierto";
   const puedeResolver = estado === "abierto" || estado === "en_curso";
@@ -259,6 +261,15 @@ export function TicketCard({
         {cerrada && (
           <p className="text-[13px] leading-relaxed text-[var(--text-secondary)]">
             Ya está cerrada. Si vuelve a pasar, abre una solicitud nueva.
+          </p>
+        )}
+
+        {/* Solo cuando el aviso SÍ salió. Sin marca no se dice nada: puede ser
+            que no se haya mandado por cualquiera de los motivos del toast, y
+            pintar "no avisado" en cada resuelta vieja sería ruido. */}
+        {horaAviso && (
+          <p className="ibx-mono text-[12px] font-semibold text-[var(--success-text)]">
+            Huésped avisado · {horaAviso}
           </p>
         )}
 

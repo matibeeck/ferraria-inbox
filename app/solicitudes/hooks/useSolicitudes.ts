@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { isMotivoSinAviso, type AvisoCierre } from "@/lib/aviso-cierre";
 import type { AvailableHotel } from "@/lib/inbox-tenant";
 import {
   ordenarTickets,
@@ -130,14 +131,23 @@ export function useSolicitudes({
     };
   }, [cargar]);
 
+  /**
+   * Devuelve el resultado del aviso al huésped cuando el servidor lo intentó
+   * (solo al resolver), o `null` si no aplica — por ejemplo, la segunda tablet
+   * que toca "Resolver" sobre una solicitud que ya estaba resuelta.
+   */
   const cambiarEstado = useCallback(
-    async (id: string, nuevoEstado: TicketEstado) => {
+    async (id: string, nuevoEstado: TicketEstado): Promise<AvisoCierre | null> => {
       const respuesta = await fetch("/api/solicitudes", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id, estado: nuevoEstado }),
       });
-      const payload = (await respuesta.json()) as { solicitud?: ServiceTicket; error?: string };
+      const payload = (await respuesta.json()) as {
+        solicitud?: ServiceTicket;
+        error?: string;
+        aviso?: { enviado?: unknown; motivo?: unknown };
+      };
 
       if (!respuesta.ok) {
         // El 409 significa que alguien más la movió: se recarga para que la
@@ -155,6 +165,12 @@ export function useSolicitudes({
       // Recarga en segundo plano: con el filtro "Abiertas" la solicitud resuelta
       // tiene que desaparecer de la lista, no quedarse pintada como resuelta.
       void cargar();
+
+      const aviso = payload.aviso;
+      if (!aviso || typeof aviso.enviado !== "boolean") return null;
+      return aviso.enviado
+        ? { enviado: true }
+        : { enviado: false, ...(isMotivoSinAviso(aviso.motivo) ? { motivo: aviso.motivo } : {}) };
     },
     [cargar]
   );
