@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { apiError } from "@/lib/api-error";
 import { requireSessionUser } from "@/lib/auth/require-user";
 import { resolveAllowedHotelIds } from "@/lib/inbox-tenant";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
@@ -71,17 +72,11 @@ export async function POST(request: Request) {
       );
 
     if (error) {
-      console.error("[push/subscribe POST]", error);
-      return NextResponse.json(
-        { error: error.message || "No se pudo guardar la suscripción" },
-        { status: 502 }
-      );
+      return apiError(502, "push_subscribe_failed", { cause: error, log: "[push/subscribe POST]", message: "No se pudo guardar la suscripción" });
     }
 
     return NextResponse.json({ ok: true });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Error desconocido";
-    console.error("[push/subscribe POST]", e);
-    return NextResponse.json({ error: msg }, { status: 500 });
+    return apiError(500, "unexpected_error", { cause: e, log: "[push/subscribe POST]", message: "No se pudo guardar la suscripción" });
   }
 }

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { apiError } from "@/lib/api-error";
 import { requireSessionUser } from "@/lib/auth/require-user";
 import { requireCapability } from "@/lib/auth/require-capability";
 import {
@@ -81,8 +82,11 @@ export async function POST(request: Request) {
       .eq("hotel_id", hotelId)
       .maybeSingle();
     if (quoteError) {
-      console.error("[followups cancel POST] quote lookup", quoteError.code ?? "sin_code");
-      return NextResponse.json({ error: "No se pudo cancelar el seguimiento" }, { status: 502 });
+      return apiError(502, "quote_lookup_failed", {
+        cause: quoteError,
+        log: "[followups cancel POST] quote lookup",
+        message: "No se pudo cancelar el seguimiento",
+      });
     }
     if (!quote) {
       return NextResponse.json({ error: "Cotización no encontrada" }, { status: 404 });
@@ -101,14 +105,15 @@ export async function POST(request: Request) {
       if (error.code === "23505") {
         return NextResponse.json({ ok: true, alreadyExists: true });
       }
-      console.error("[followups cancel POST]", error);
-      return NextResponse.json({ error: error.message }, { status: 502 });
+      return apiError(502, "followup_insert_failed", {
+        cause: error,
+        log: "[followups cancel POST]",
+        message: "No se pudo cancelar el seguimiento",
+      });
     }
 
     return NextResponse.json({ ok: true });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Error desconocido";
-    console.error("[followups cancel POST]", e);
-    return NextResponse.json({ error: msg }, { status: 500 });
+    return apiError(500, "unexpected_error", { cause: e, log: "[followups cancel POST]", message: "No se pudo cancelar el seguimiento" });
   }
 }

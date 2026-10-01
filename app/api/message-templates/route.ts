@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { apiError } from "@/lib/api-error";
 import { requireSessionUser } from "@/lib/auth/require-user";
 import { requireCapability } from "@/lib/auth/require-capability";
 import {
@@ -39,8 +40,6 @@ export async function GET(request: Request) {
     const templates = await fetchHotelMessageTemplates(supabase, activeHotelId);
     return NextResponse.json({ templates, activeHotelId });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Error desconocido";
-    console.error("[message-templates GET]", e);
-    return NextResponse.json({ error: msg }, { status: 500 });
+    return apiError(500, "unexpected_error", { cause: e, log: "[message-templates GET]", message: "No se pudieron cargar las plantillas" });
   }
 }

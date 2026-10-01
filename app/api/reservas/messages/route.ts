@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { apiError } from "@/lib/api-error";
 import { requireSessionUser } from "@/lib/auth/require-user";
 import { assertConversationInHotel, requireActiveHotel } from "@/lib/auth/require-hotel";
 import { buildHotelWhatsappByIdMap, resolveHotelWaIdentitiesForRow } from "@/lib/hotel-whatsapp-map";
@@ -97,8 +98,11 @@ export async function GET(request: Request) {
       .maybeSingle();
 
     if (convError) {
-      console.error("[reservas messages GET] conversation", convError);
-      return NextResponse.json({ error: convError.message }, { status: 502 });
+      return apiError(502, "conversation_lookup_failed", {
+        cause: convError,
+        log: "[reservas messages GET] conversation",
+        message: "No se pudo cargar la conversación",
+      });
     }
     if (!convRow) {
       return NextResponse.json({ error: "Conversación no encontrada" }, { status: 404 });
@@ -134,8 +138,6 @@ export async function GET(request: Request) {
       messageLimit: MESSAGES_LIMIT,
     });
   } catch (e) {
-    const message = e instanceof Error ? e.message : "Error desconocido";
-    console.error("[reservas messages GET]", e);
-    return NextResponse.json({ error: message }, { status: 500 });
+    return apiError(500, "unexpected_error", { cause: e, log: "[reservas messages GET]", message: "No se pudo cargar la conversación" });
   }
 }

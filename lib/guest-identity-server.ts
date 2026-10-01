@@ -55,3 +55,10 @@ export async function resolveConversationRecipient(
 
   return { ok: true, engineTextIdentity, mediaIdentity: key || raw, bodyMismatch };
 }
+
+/** Copy para la bandeja según por qué no se pudo resolver el destinatario. */
+export function recipientErrorCopy(status: 404 | 502): string {
+  return status === 404
+    ? "No se encontró el número del huésped de esta conversación."
+    : "No se pudo verificar el destinatario. Intenta de nuevo en un momento.";
+}

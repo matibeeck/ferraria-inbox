@@ -1,13 +1,11 @@
 import { NextResponse } from "next/server";
+import { apiError, isDev } from "@/lib/api-error";
 import { requireSessionUser } from "@/lib/auth/require-user";
 import { requireCapability } from "@/lib/auth/require-capability";
 import { assertConversationInHotel } from "@/lib/auth/require-hotel";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
 
 export const dynamic = "force-dynamic";
-
-/** El cuerpo del engine puede traer el resumen de la conversación: solo en dev. */
-const isDev = process.env.NODE_ENV !== "production";
 
 /**
  * Resumen devuelto por el engine de forma síncrona. Si el cuerpo no trae
@@ -76,6 +74,7 @@ export async function POST(request: Request) {
 
     const text = await res.text();
     if (!res.ok) {
+      // El cuerpo puede traer el resumen de la conversación: solo en dev.
       console.error("[create-conversation-summary] engine", res.status, isDev ? text : "");
     }
 
@@ -88,7 +87,6 @@ export async function POST(request: Request) {
       summary: res.ok ? readEngineSummary(text) : null,
     });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Error desconocido";
-    return NextResponse.json({ error: msg }, { status: 500 });
+    return apiError(500, "unexpected_error", { cause: e, log: "[create-conversation-summary]", message: "No se pudo generar el resumen" });
   }
 }

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { apiError, errorCodeForLog, isDev } from "@/lib/api-error";
 import { requireSessionUser } from "@/lib/auth/require-user";
 import { assertConversationInHotel, requireActiveHotel } from "@/lib/auth/require-hotel";
 import {
@@ -9,7 +10,7 @@ import {
 import { readEngineError } from "@/lib/engine-error";
 import { DEFAULT_COMPOSER_LANGUAGE, normalizeLanguageCode } from "@/lib/language-names";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
-import { resolveConversationRecipient } from "@/lib/guest-identity-server";
+import { recipientErrorCopy, resolveConversationRecipient } from "@/lib/guest-identity-server";
 
 export const dynamic = "force-dynamic";
 
@@ -71,7 +72,7 @@ async function readHotelWhatsappConfig(hotelId: string | null | undefined): Prom
       .maybeSingle();
 
     if (error) {
-      console.error("[send-human-message] hotel lookup failed", error);
+      console.error("[send-human-message] hotel lookup failed", errorCodeForLog(error));
       return empty;
     }
 
@@ -80,7 +81,7 @@ async function readHotelWhatsappConfig(hotelId: string | null | undefined): Prom
       whatsappNumber: hotel?.whatsapp_number ?? null,
     };
   } catch (e) {
-    console.error("[send-human-message] hotel lookup exception", e);
+    console.error("[send-human-message] hotel lookup exception", isDev ? e : errorCodeForLog(e));
     return empty;
   }
 }
@@ -174,11 +175,10 @@ export async function POST(request: Request) {
       body.guestPhone
     );
     if (!recipient.ok) {
-      console.error("[send-human-message] destinatario", recipient.code);
-      return NextResponse.json(
-        { error: "No se encontró el número del huésped de esta conversación" },
-        { status: recipient.status }
-      );
+      return apiError(recipient.status, recipient.code, {
+        log: "[send-human-message] destinatario",
+        message: recipientErrorCopy(recipient.status),
+      });
     }
     if (recipient.bodyMismatch) {
       return NextResponse.json(
@@ -264,7 +264,9 @@ export async function POST(request: Request) {
       // Nunca el cuerpo crudo: puede traer un stack del engine o el payload de
       // Meta con el teléfono del huésped adentro, y esto se loguea en producción.
       const engineMessage = readEngineError(safeJsonParse(rawBody), GENERIC_ENGINE_ERROR);
-      console.error("[send-human-message]", res.status, engineMessage);
+      // En producción solo el status: el mensaje del engine puede traer el de
+      // Meta, con el teléfono del huésped adentro.
+      console.error("[send-human-message] engine", res.status, isDev ? engineMessage : "");
 
       // Fallo de traducción: el engine no llegó a enviarle nada al huésped, y
       // eso hay que decírselo a la bandeja con un código, no con texto suelto,
@@ -308,7 +310,6 @@ export async function POST(request: Request) {
     // reintento: cualquier corte de red la dejaba pegada hasta refrescar.
     return NextResponse.json({ ok: true, whatsappMessageId: wamid ?? null });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Error desconocido";
-    return NextResponse.json({ error: msg }, { status: 500 });
+    return apiError(500, "unexpected_error", { cause: e, log: "[send-human-message]", message: GENERIC_ENGINE_ERROR });
   }
 }

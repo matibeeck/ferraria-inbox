@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { apiError } from "@/lib/api-error";
 import type { SupabaseClient, User } from "@supabase/supabase-js";
 import { CONVERSATIONS_TABLE } from "@/lib/conversation-schema";
 import {
@@ -128,7 +129,11 @@ export async function assertRowInAllowedHotel(
 
   if (error) {
     return {
-      response: NextResponse.json({ error: error.message }, { status: 502 }),
+      response: apiError(502, "ownership_lookup_failed", {
+        cause: error,
+        log: `[require-hotel] ${table}`,
+        message: "No se pudo verificar el acceso a este recurso",
+      }),
       hotelId: null,
     };
   }
@@ -179,7 +184,14 @@ export async function assertStoragePathInHotel(
       .maybeSingle();
     // `storage_path` puede no existir como columna: ese error es best-effort.
     if (error && column === "media_storage_path") {
-      return { response: NextResponse.json({ error: error.message }, { status: 502 }), hotelId: null };
+      return {
+        response: apiError(502, "ownership_lookup_failed", {
+          cause: error,
+          log: "[require-hotel] storage path",
+          message: "No se pudo verificar el acceso a este archivo",
+        }),
+        hotelId: null,
+      };
     }
     if (data) {
       row = data;

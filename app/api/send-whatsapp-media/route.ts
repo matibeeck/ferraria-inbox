@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
+import { apiError, isDev } from "@/lib/api-error";
 import { requireSessionUser } from "@/lib/auth/require-user";
 import { assertConversationInHotel, requireActiveHotel } from "@/lib/auth/require-hotel";
 import { attachWamidByClientTempId, extractWamid } from "@/lib/outbound-wamid";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
-import { resolveConversationRecipient } from "@/lib/guest-identity-server";
+import { recipientErrorCopy, resolveConversationRecipient } from "@/lib/guest-identity-server";
 
 export const dynamic = "force-dynamic";
 
@@ -203,11 +204,10 @@ export async function POST(request: Request) {
       toRaw
     );
     if (!recipient.ok) {
-      console.error("[send-whatsapp-media] destinatario", recipient.code);
-      return NextResponse.json(
-        { error: "No se encontró el número del huésped de esta conversación" },
-        { status: recipient.status }
-      );
+      return apiError(recipient.status, recipient.code, {
+        log: "[send-whatsapp-media] destinatario",
+        message: recipientErrorCopy(recipient.status),
+      });
     }
     if (recipient.bodyMismatch) {
       return NextResponse.json(
@@ -249,7 +249,10 @@ export async function POST(request: Request) {
     });
 
     if (uploadResult.error) {
-      console.error("[send-whatsapp-media] upload a storage falló", uploadResult.error.message);
+      console.error(
+        "[send-whatsapp-media] upload a storage falló",
+        isDev ? uploadResult.error.message : ""
+      );
       return NextResponse.json({ error: "No se pudo guardar el archivo" }, { status: 502 });
     }
 
@@ -261,7 +264,7 @@ export async function POST(request: Request) {
       .createSignedUrl(storagePath, SIGNED_URL_TTL_SECONDS);
 
     if (signedError || !signedData?.signedUrl) {
-      console.error("[send-whatsapp-media] signed URL falló", signedError?.message);
+      console.error("[send-whatsapp-media] signed URL falló", isDev ? signedError?.message : "");
       return NextResponse.json(
         { error: "No se pudo preparar el archivo para el envío" },
         { status: 502 }
@@ -295,7 +298,7 @@ export async function POST(request: Request) {
     if (!res.ok) {
       // Solo el mensaje curado y sin URLs: el crudo trae de vuelta el `link`
       // firmado y el error completo de Meta.
-      console.error("[send-whatsapp-media] engine", res.status, readEngineError(parsedBody));
+      console.error("[send-whatsapp-media] engine", res.status, isDev ? readEngineError(parsedBody) : "");
       return NextResponse.json({ error: readEngineError(parsedBody) }, { status: 502 });
     }
 
@@ -319,7 +322,10 @@ export async function POST(request: Request) {
       whatsappType,
     });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Error desconocido";
-    return NextResponse.json({ error: msg }, { status: 500 });
+    return apiError(500, "unexpected_error", {
+      cause: e,
+      log: "[send-whatsapp-media]",
+      message: GENERIC_ENGINE_ERROR,
+    });
   }
 }

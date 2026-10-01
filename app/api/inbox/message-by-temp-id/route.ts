@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { apiError } from "@/lib/api-error";
 import { requireSessionUser } from "@/lib/auth/require-user";
 import { assertConversationInHotel, requireActiveHotel } from "@/lib/auth/require-hotel";
 import { findOutboundByClientTempId } from "@/lib/outbound-wamid";
@@ -86,8 +87,6 @@ export async function GET(request: Request) {
       whatsappMessageId: found.wamid,
     });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Error desconocido";
-    console.error("[inbox message-by-temp-id GET]", e);
-    return NextResponse.json({ error: msg }, { status: 500 });
+    return apiError(500, "unexpected_error", { cause: e, log: "[inbox message-by-temp-id GET]", message: "No se pudo verificar el envío" });
   }
 }

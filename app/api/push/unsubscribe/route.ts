@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { apiError } from "@/lib/api-error";
 import { requireSessionUser } from "@/lib/auth/require-user";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
 
@@ -30,17 +31,11 @@ export async function POST(request: Request) {
       .eq("user_id", auth.user.id);
 
     if (error) {
-      console.error("[push/unsubscribe POST]", error);
-      return NextResponse.json(
-        { error: error.message || "No se pudo eliminar la suscripción" },
-        { status: 502 }
-      );
+      return apiError(502, "push_unsubscribe_failed", { cause: error, log: "[push/unsubscribe POST]", message: "No se pudo eliminar la suscripción" });
     }
 
     return NextResponse.json({ ok: true });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Error desconocido";
-    console.error("[push/unsubscribe POST]", e);
-    return NextResponse.json({ error: msg }, { status: 500 });
+    return apiError(500, "unexpected_error", { cause: e, log: "[push/unsubscribe POST]", message: "No se pudo eliminar la suscripción" });
   }
 }

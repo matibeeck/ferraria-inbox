@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { apiError } from "@/lib/api-error";
 import type { SupabaseClient, User } from "@supabase/supabase-js";
 import { requireSessionUser } from "@/lib/auth/require-user";
 import { requireCapability } from "@/lib/auth/require-capability";
@@ -125,8 +126,11 @@ export async function GET(request: Request) {
         .eq("status", "pendiente");
 
       if (error) {
-        console.error("[reservas count GET]", error);
-        return NextResponse.json({ error: error.message }, { status: 502 });
+        return apiError(502, "reservas_count_failed", {
+          cause: error,
+          log: "[reservas count GET]",
+          message: "No se pudieron contar las reservas",
+        });
       }
       return NextResponse.json({
         count: count ?? 0,
@@ -148,8 +152,11 @@ export async function GET(request: Request) {
 
     const { data, error } = await query;
     if (error) {
-      console.error("[reservas GET]", error);
-      return NextResponse.json({ error: error.message }, { status: 502 });
+      return apiError(502, "reservas_query_failed", {
+        cause: error,
+        log: "[reservas GET]",
+        message: "No se pudieron cargar las reservas",
+      });
     }
 
     return NextResponse.json({
@@ -158,9 +165,7 @@ export async function GET(request: Request) {
       activeHotelId,
     });
   } catch (e) {
-    const message = e instanceof Error ? e.message : "Error desconocido";
-    console.error("[reservas GET]", e);
-    return NextResponse.json({ error: message }, { status: 500 });
+    return apiError(500, "unexpected_error", { cause: e, log: "[reservas GET]", message: "No se pudieron cargar las reservas" });
   }
 }
 
@@ -220,8 +225,11 @@ export async function PATCH(request: Request) {
       .maybeSingle();
 
     if (fetchError) {
-      console.error("[reservas PATCH] fetch", fetchError);
-      return NextResponse.json({ error: fetchError.message }, { status: 502 });
+      return apiError(502, "reserva_lookup_failed", {
+        cause: fetchError,
+        log: "[reservas PATCH] fetch",
+        message: "No se pudo actualizar la reserva",
+      });
     }
     if (!reservaRow) {
       return NextResponse.json({ error: "Reserva no encontrada" }, { status: 404 });
@@ -241,8 +249,11 @@ export async function PATCH(request: Request) {
       .maybeSingle();
 
     if (error) {
-      console.error("[reservas PATCH]", error);
-      return NextResponse.json({ error: error.message }, { status: 502 });
+      return apiError(502, "reserva_update_failed", {
+        cause: error,
+        log: "[reservas PATCH]",
+        message: "No se pudo actualizar la reserva",
+      });
     }
     if (!data) {
       return NextResponse.json({ error: "Reserva no encontrada" }, { status: 404 });
@@ -250,8 +261,6 @@ export async function PATCH(request: Request) {
 
     return NextResponse.json({ ok: true, reserva: data as unknown as Reserva });
   } catch (e) {
-    const message = e instanceof Error ? e.message : "Error desconocido";
-    console.error("[reservas PATCH]", e);
-    return NextResponse.json({ error: message }, { status: 500 });
+    return apiError(500, "unexpected_error", { cause: e, log: "[reservas PATCH]", message: "No se pudo actualizar la reserva" });
   }
 }

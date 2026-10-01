@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { apiError, isDev } from "@/lib/api-error";
 import { requireSessionUser } from "@/lib/auth/require-user";
 import { requireCapability } from "@/lib/auth/require-capability";
 import {
@@ -19,12 +20,6 @@ const HOTELS_TABLE = "hotels";
 
 /** Copy exacto del bloqueo por hotel. Lo muestra el toast del inbox tal cual. */
 const TEMPLATES_DISABLED_ERROR = "Envío de plantillas deshabilitado para este hotel";
-
-/**
- * Detalle crudo (cuerpo del engine, mensajes de excepción) solo en desarrollo:
- * en producción puede traer teléfonos del payload de Meta o un stack.
- */
-const isDev = process.env.NODE_ENV !== "production";
 
 export async function POST(request: Request) {
   try {
@@ -194,13 +189,10 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ ok: true, result: parsed });
   } catch (e) {
-    console.error(
-      "[send-whatsapp-template] error inesperado",
-      isDev ? e : e instanceof Error ? e.name : "unknown"
-    );
-    return NextResponse.json(
-      { error: isDev && e instanceof Error ? e.message : GENERIC_TEMPLATE_ERROR },
-      { status: 500 }
-    );
+    return apiError(500, "unexpected_error", {
+      cause: e,
+      log: "[send-whatsapp-template]",
+      message: GENERIC_TEMPLATE_ERROR,
+    });
   }
 }

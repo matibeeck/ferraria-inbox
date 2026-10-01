@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { apiError } from "@/lib/api-error";
 import { requireSessionUser } from "@/lib/auth/require-user";
 import { resolveAllowedHotelIds } from "@/lib/inbox-tenant";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
@@ -79,17 +80,11 @@ export async function POST(request: Request) {
     });
 
     if (error) {
-      console.error("[feedback POST]", error);
-      return NextResponse.json(
-        { error: error.message || "No se pudo guardar el feedback" },
-        { status: 502 }
-      );
+      return apiError(502, "feedback_insert_failed", { cause: error, log: "[feedback POST]", message: "No se pudo guardar el feedback" });
     }
 
     return NextResponse.json({ ok: true });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Error desconocido";
-    console.error("[feedback POST]", e);
-    return NextResponse.json({ error: msg }, { status: 500 });
+    return apiError(500, "unexpected_error", { cause: e, log: "[feedback POST]", message: "No se pudo guardar el feedback" });
   }
 }

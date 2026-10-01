@@ -1,5 +1,6 @@
 /** Bandeja: GET fusiona `conversations` + mensajes `Wubby_Whatsapp`; PATCH actualiza solo `conversations`. */
 import { NextResponse } from "next/server";
+import { apiError } from "@/lib/api-error";
 import { buildInboxConversations, getConversationDisplayActivityMs } from "@/lib/chat-utils";
 import {
   buildHotelWhatsappByIdMap,
@@ -238,12 +239,11 @@ function emptyInboxResponse(availableHotels: AvailableHotel[] = [], activeHotelI
 
 /** Error de Supabase para el cliente: el detalle crudo solo fuera de producción. */
 function upstreamError(label: string, error: { code?: string; message?: string }) {
-  console.error(`[inbox GET] ${label}`, error.code ?? "sin_code");
-  const isDev = process.env.NODE_ENV !== "production";
-  return NextResponse.json(
-    { error: isDev && error.message ? error.message : "No se pudo cargar la bandeja" },
-    { status: 502 }
-  );
+  return apiError(502, "inbox_query_failed", {
+    cause: error,
+    log: `[inbox GET] ${label}`,
+    message: "No se pudo cargar la bandeja",
+  });
 }
 
 export async function GET(request: Request) {
@@ -565,9 +565,7 @@ export async function GET(request: Request) {
       query: null,
     });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Error desconocido";
-    console.error("[inbox GET]", e);
-    return NextResponse.json({ error: msg }, { status: 500 });
+    return apiError(500, "unexpected_error", { cause: e, log: "[inbox GET]", message: "No se pudo cargar la bandeja" });
   }
 }
 
@@ -709,11 +707,11 @@ export async function PATCH(request: Request) {
       .maybeSingle();
 
     if (error) {
-      console.error("[inbox PATCH]", error);
-      return NextResponse.json(
-        { error: error.message || "No se pudo actualizar la conversación" },
-        { status: 502 }
-      );
+      return apiError(502, "conversation_update_failed", {
+        cause: error,
+        log: "[inbox PATCH]",
+        message: "No se pudo actualizar la conversación",
+      });
     }
     if (!updatedRow) {
       return NextResponse.json({ error: "Conversación no encontrada" }, { status: 404 });
@@ -728,7 +726,6 @@ export async function PATCH(request: Request) {
       conversation: updatedRow,
     });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Error desconocido";
-    return NextResponse.json({ error: msg }, { status: 500 });
+    return apiError(500, "unexpected_error", { cause: e, log: "[inbox PATCH]", message: "No se pudo actualizar la conversación" });
   }
 }

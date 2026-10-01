@@ -1,13 +1,11 @@
 import { NextResponse } from "next/server";
+import { apiError } from "@/lib/api-error";
 import { requireSessionUser } from "@/lib/auth/require-user";
 import { requireCapability } from "@/lib/auth/require-capability";
 import { assertConversationInHotel } from "@/lib/auth/require-hotel";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
 
 export const dynamic = "force-dynamic";
-
-/** Detalle crudo de Supabase y de excepciones solo en desarrollo. */
-const isDev = process.env.NODE_ENV !== "production";
 
 /**
  * Lee `conversation_summaries` con el cliente de servidor (service role, se
@@ -44,23 +42,15 @@ export async function GET(request: Request) {
       .maybeSingle();
 
     if (supabaseError) {
-      console.error(
-        "[conversation-summary GET] select",
-        supabaseError.code ?? "sin_code",
-        isDev ? supabaseError.message : ""
-      );
-      return NextResponse.json({ error: "No se pudo cargar el resumen" }, { status: 502 });
+      return apiError(502, "summary_query_failed", {
+        cause: supabaseError,
+        log: "[conversation-summary GET] select",
+        message: "No se pudo cargar el resumen",
+      });
     }
 
     return NextResponse.json({ data });
   } catch (e) {
-    console.error(
-      "[conversation-summary GET] error inesperado",
-      isDev ? e : e instanceof Error ? e.name : "unknown"
-    );
-    return NextResponse.json(
-      { error: isDev && e instanceof Error ? e.message : "No se pudo cargar el resumen" },
-      { status: 500 }
-    );
+    return apiError(500, "unexpected_error", { cause: e, log: "[conversation-summary GET]", message: "No se pudo cargar el resumen" });
   }
 }
