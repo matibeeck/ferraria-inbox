@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { construirPayloadHumanReply } from "@/lib/engine-human-reply-payload";
 import { attachWamidByClientTempId, extractWamid } from "@/lib/outbound-wamid";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
 
@@ -7,12 +8,13 @@ import { getSupabaseServerClient } from "@/lib/supabase-server";
  * mismo endpoint del engine que usa el composer: `POST /inbox/human-reply`
  * (`ENGINE_HUMAN_REPLY_URL` + `INBOX_SHARED_SECRET`). No hay cliente de Meta
  * propio: el engine es quien manda, traduce si se le pide, inserta la fila en
- * `Wubby_Whatsapp` con `sender = "Human Answer"` y, en hoteles que siguen en
- * n8n, hace proxy al webhook de siempre.
+ * `Wubby_Whatsapp` y, en hoteles que siguen en n8n, hace proxy al webhook de
+ * siempre.
  *
- * El payload replica el contrato de `app/api/send-human-message/route.ts`
- * campo por campo. Esa ruta no se tocó a propósito (es la que usa recepción
- * para contestar en vivo); si su payload cambia, este también.
+ * El payload (`lib/engine-human-reply-payload.ts`) replica el contrato de
+ * `app/api/send-human-message/route.ts` campo por campo, más `automatico`.
+ * Esa ruta no se tocó a propósito (es la que usa recepción para contestar en
+ * vivo); si su payload cambia, este también.
  *
  * Lo usa hoy el aviso de cierre de solicitudes (`lib/aviso-cierre-server.ts`).
  */
@@ -86,6 +88,8 @@ export async function enviarTextoHumanoPorEngine(input: {
   hotelId: string;
   /** ISO 639-1 distinto de español, o `null` para mandarlo tal cual. */
   targetLang: string | null;
+  /** Ver `EntradaPayloadHumanReply.automatico`. */
+  automatico: boolean;
 }): Promise<ResultadoEnvioHumano> {
   const engineUrl = process.env.ENGINE_HUMAN_REPLY_URL;
   const sharedSecret = process.env.INBOX_SHARED_SECRET;
@@ -99,18 +103,18 @@ export async function enviarTextoHumanoPorEngine(input: {
   // backstop de `wamid`, igual que en el composer.
   const clientTempId = randomUUID();
 
-  const payload = {
+  const payload = construirPayloadHumanReply({
     guestPhone: input.guestPhone,
     message: input.message,
-    ...(input.targetLang ? { targetLang: input.targetLang } : {}),
+    targetLang: input.targetLang,
     conversationId: input.conversationId,
     hotelId: input.hotelId,
     whatsappPhoneNumberId: hotelWhatsapp.whatsappPhoneNumberId,
     whatsappNumber: hotelWhatsapp.whatsappNumber,
-    source: "FerrarIA-inbox",
     sentAt: new Date().toISOString(),
     clientTempId,
-  };
+    automatico: input.automatico,
+  });
 
   let res: Response;
   try {

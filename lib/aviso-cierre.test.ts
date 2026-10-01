@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
@@ -10,9 +12,11 @@ import {
   horaAvisoHuesped,
   mensajeAvisoParaRecepcion,
   MOTIVOS_SIN_AVISO,
+  opcionesEnvioAvisoCierre,
   textoAvisoCierre,
   type EntradaAvisoCierre,
 } from "./aviso-cierre.ts";
+import { construirPayloadHumanReply } from "./engine-human-reply-payload.ts";
 
 /**
  * Escenario base que SÍ avisa: ticket creado a las 10:00 hora Bogotá (15:00Z),
@@ -299,4 +303,57 @@ test("sin acceso a datos de huéspedes, el motivo no revela nada de la conversac
     motivo: "envio_fallido",
   });
   assert.equal(mensajeAvisoParaRecepcion({ enviado: false }), "No se avisó al huésped");
+});
+
+const BASE_PAYLOAD = {
+  guestPhone: "573001112233",
+  message: "Listo, ya quedó resuelta tu solicitud.",
+  conversationId: "c-1",
+  hotelId: "dd99def1-daf4-4ca5-8dd9-149aa988394b",
+  whatsappPhoneNumberId: "pnid-1",
+  whatsappNumber: "573009998877",
+  sentAt: "2026-10-01T15:00:00.000Z",
+  clientTempId: "tmp-1",
+};
+
+test("el aviso de cierre viaja con automatico: true, con y sin traducción", () => {
+  const conTraduccion = construirPayloadHumanReply({ ...BASE_PAYLOAD, ...opcionesEnvioAvisoCierre("en") });
+  assert.equal(conTraduccion.automatico, true);
+  assert.equal(conTraduccion.targetLang, "en");
+
+  // El reintento en español tras un fallo de traducción también es automático.
+  const enEspanol = construirPayloadHumanReply({ ...BASE_PAYLOAD, ...opcionesEnvioAvisoCierre(null) });
+  assert.equal(enEspanol.automatico, true);
+  assert.ok(!("targetLang" in enEspanol));
+  assert.equal(JSON.parse(JSON.stringify(enEspanol)).automatico, true);
+});
+
+test("sin automatico el campo ni siquiera viaja: el engine se comporta como siempre", () => {
+  const payload = construirPayloadHumanReply({ ...BASE_PAYLOAD, targetLang: null, automatico: false });
+  assert.ok(!("automatico" in payload));
+  assert.deepEqual(Object.keys(payload).sort(), [
+    "clientTempId",
+    "conversationId",
+    "guestPhone",
+    "hotelId",
+    "message",
+    "sentAt",
+    "source",
+    "whatsappNumber",
+    "whatsappPhoneNumberId",
+  ]);
+});
+
+test("los dos envíos del aviso pasan por opcionesEnvioAvisoCierre", () => {
+  const source = readFileSync(join(process.cwd(), "lib", "aviso-cierre-server.ts"), "utf8");
+  const llamados = source.split("\n").filter((linea) => linea.includes("enviarTextoHumanoPorEngine({"));
+  assert.equal(llamados.length, 2);
+  for (const llamado of llamados) assert.ok(llamado.includes("opcionesEnvioAvisoCierre("), llamado);
+});
+
+test("la ruta del chat de recepción NO manda automatico", () => {
+  const source = readFileSync(join(process.cwd(), "app", "api", "send-human-message", "route.ts"), "utf8");
+  assert.ok(source.includes('source: "FerrarIA-inbox"'));
+  assert.ok(!source.includes("automatico"));
+  assert.ok(!source.includes("construirPayloadHumanReply"));
 });

@@ -558,6 +558,16 @@ export function toBool(v: unknown, defaultVal = false): boolean {
 }
 
 /**
+ * Fila escrita por un envío automático del sistema (`origin = 'system'`), p. ej.
+ * el aviso de cierre de solicitudes mandado con `automatico: true`. No es la IA
+ * conversando ni recepción escribiendo.
+ */
+export function isAutomaticNoticeRow(row: WubbyWhatsappRow): boolean {
+  const originRaw = getRowField(row, "origin");
+  return typeof originRaw === "string" && originRaw.trim().toLowerCase() === "system";
+}
+
+/**
  * Clasificación de mensaje para la burbuja.
  * - Sender = línea hotel → saliente (IA/agente por defecto).
  * - Recipient = línea hotel y sender no es hotel → entrante huésped.
@@ -583,6 +593,9 @@ export function classifyMessageSender(
     const o = originRaw.trim().toLowerCase();
     if (o === "human") return "agent";
     if (o === "ai") return "ai";
+    // Aviso automático del sistema: siempre del lado del hotel, sin importar
+    // con qué forma venga el `sender` (ver `isAutomaticNoticeRow`).
+    if (o === "system") return "ai";
     if (o === "client" || o === "guest" || o === "user") return "user";
   }
 
@@ -1129,6 +1142,8 @@ export function buildMessageFromWubbyRow(
   const inboundDetectedLang = sender === "user" ? readInboundDetectedLang(row) : undefined;
   const clientTempIdRaw = readStringField(row, "client_temp_id", "clientTempId");
   const clientTempId = clientTempIdRaw?.trim() || undefined;
+  // Nunca en una burbuja del huésped: si el `sender` es él, la fila es suya.
+  const automaticNotice = sender !== "user" && isAutomaticNoticeRow(row);
 
   return {
     message: {
@@ -1158,6 +1173,7 @@ export function buildMessageFromWubbyRow(
       // función, así que la burbuja se repinta sola cuando aparece.
       ...(inboundTranslation ? { inboundTranslation } : {}),
       ...(inboundDetectedLang ? { inboundDetectedLang } : {}),
+      ...(automaticNotice ? { automaticNotice: true } : {}),
     },
     previewRaw,
     createdAtIso: row.created_at,

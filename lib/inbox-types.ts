@@ -157,6 +157,13 @@ export interface Message {
   clientTempId?: string;
   /** Solo mensajes salientes creados en cliente; histórico sin campo = confirmado en UI. */
   status?: MessageDeliveryStatus;
+  /**
+   * Columna `origin = 'system'`: mensaje automático que mandó el sistema (hoy,
+   * el aviso de cierre de solicitudes), no la IA conversando ni recepción. Sale
+   * del lado del hotel con la etiqueta "Aviso automático" y no cuenta como
+   * respuesta de la IA ni le pone los no leídos en 0 a la conversación.
+   */
+  automaticNotice?: boolean;
 }
 
 export interface Conversation {

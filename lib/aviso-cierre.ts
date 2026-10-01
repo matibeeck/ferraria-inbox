@@ -192,6 +192,19 @@ export function decidirAvisoCierre(entrada: EntradaAvisoCierre): DecisionAvisoCi
   };
 }
 
+/**
+ * Opciones de envío del aviso hacia `POST /inbox/human-reply`. `automatico`
+ * va SIEMPRE: el aviso no es recepción tomando la conversación, así que el
+ * engine no debe apagar la IA, ni marcarla como en manos de recepción, ni
+ * poner los no leídos en 0. La conversación queda exactamente como estaba.
+ */
+export function opcionesEnvioAvisoCierre(targetLang: string | null): {
+  targetLang: string | null;
+  automatico: true;
+} {
+  return { targetLang, automatico: true };
+}
+
 /** Resultado del aviso tal como viaja en la respuesta del PATCH. */
 export type AvisoCierre = { enviado: boolean; motivo?: MotivoSinAviso };
 

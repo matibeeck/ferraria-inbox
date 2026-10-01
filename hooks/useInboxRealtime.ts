@@ -511,8 +511,11 @@ export function useInboxRealtime({
             getMessageDisplayMs(built.message as unknown as Record<string, unknown>) >=
             getConversationDisplayActivityMs(c);
           const isActiveConversation = c.id === activeConversationIdRef.current;
-          const nextUnreadCount =
-            built.message.sender === "user"
+          // Un aviso automático no es nadie contestando: el engine no le toca
+          // los no leídos a la conversación, y acá tampoco.
+          const nextUnreadCount = built.message.automaticNotice
+            ? c.unreadCount
+            : built.message.sender === "user"
               ? isActiveConversation || c.operationalStatus === "closed"
                 ? 0
                 : c.unreadCount + 1

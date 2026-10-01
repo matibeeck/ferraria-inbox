@@ -1762,7 +1762,13 @@ function buildThreadDays(bubbles: Message[]): ThreadDaySection[] {
 
     const prev = section.items[section.items.length - 1];
     let grouped = false;
-    if (prev && prev.m.sender === m.sender) {
+    // Un aviso automático no se pega a las burbujas de la IA: abre su propia
+    // tanda para que lleve su etiqueta y la respuesta siguiente lleve la suya.
+    if (
+      prev &&
+      prev.m.sender === m.sender &&
+      Boolean(prev.m.automaticNotice) === Boolean(m.automaticNotice)
+    ) {
       const prevMs = bubbleTimeMs(prev.m);
       const currentMs = bubbleTimeMs(m);
       grouped =
@@ -2218,7 +2224,7 @@ function MessageBubble({
             ) : (
               <IconUserCircle className="h-3 w-3 shrink-0" aria-hidden />
             )}
-            {isAi ? "FerrarIA" : "Tú · agente"}
+            {m.automaticNotice ? "Aviso automático" : isAi ? "FerrarIA" : "Tú · agente"}
           </span>
         )}
         <div
@@ -6777,7 +6783,8 @@ function AiToggleSwitch({
 function lastAiReplyAgo(messages: Message[]): string | null {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const m = messages[i];
-    if (m.sender !== "ai") continue;
+    // El aviso automático no es una respuesta de la IA.
+    if (m.sender !== "ai" || m.automaticNotice) continue;
     return tiempoTranscurrido(m.sentAtIso ?? m.sentAt);
   }
   return null;

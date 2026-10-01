@@ -2,7 +2,12 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { assertConversationInHotel } from "@/lib/auth/require-hotel";
 import { isWaLidIdentifier, normalizeGuestIdentityKey, normalizePhoneDigits, readWaLid } from "@/lib/chat-utils";
 import { CONVERSATIONS_TABLE } from "@/lib/conversation-schema";
-import { avisoCierreActivado, decidirAvisoCierre, type AvisoCierre } from "@/lib/aviso-cierre";
+import {
+  avisoCierreActivado,
+  decidirAvisoCierre,
+  opcionesEnvioAvisoCierre,
+  type AvisoCierre,
+} from "@/lib/aviso-cierre";
 import { normalizeChannel } from "@/lib/channels";
 import { enviarTextoHumanoPorEngine } from "@/lib/engine-human-reply-server";
 import { buildGuestHistoryOrFilter } from "@/lib/inbox-fetch-messages";
@@ -13,7 +18,8 @@ import { WUBBY_TABLE } from "@/lib/wubby-schema";
 /**
  * Lado servidor del aviso de cierre: junta los datos, le pregunta a
  * `decidirAvisoCierre` (puro, testeado) y, si toca, manda el WhatsApp por el
- * mismo endpoint del engine que usa el composer.
+ * mismo endpoint del engine que usa el composer, marcado como `automatico`:
+ * el engine no toma el control de la conversación por este mensaje.
  *
  * Regla de oro: NADA de acá puede tumbar el cierre. La solicitud ya quedó
  * resuelta antes de llamar a esta función; cualquier falla termina en
@@ -214,7 +220,7 @@ export async function avisarCierreAlHuesped(params: {
       hotelId,
     };
 
-    let resultado = await enviarTextoHumanoPorEngine({ ...envio, targetLang });
+    let resultado = await enviarTextoHumanoPorEngine({ ...envio, ...opcionesEnvioAvisoCierre(targetLang) });
     // Si falló SOLO la traducción, el engine garantiza que no salió nada: se
     // reintenta una vez en español en vez de dejar al huésped sin aviso.
     if (
@@ -224,7 +230,7 @@ export async function avisarCierreAlHuesped(params: {
       resultado.codigo &&
       ERRORES_DE_TRADUCCION.has(resultado.codigo)
     ) {
-      resultado = await enviarTextoHumanoPorEngine({ ...envio, targetLang: null });
+      resultado = await enviarTextoHumanoPorEngine({ ...envio, ...opcionesEnvioAvisoCierre(null) });
     }
 
     if (!resultado.ok) {
