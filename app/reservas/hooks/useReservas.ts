@@ -135,31 +135,58 @@ export function useReservas(options?: UseReservasOptions) {
       }
     };
 
-    channel = supabase
-      .channel(`reservas-table-${scopedHotelId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "reservas",
-          filter: `hotel_id=eq.${scopedHotelId}`,
-        },
-        (payload) => void applyRealtimeRow(payload)
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "reservas",
-          filter: `hotel_id=eq.${scopedHotelId}`,
-        },
-        (payload) => void applyRealtimeRow(payload)
-      )
-      .subscribe();
+    // Mismo patrón que useInboxRealtime: el token de sesión tiene que llegar al
+    // socket ANTES de unir el canal. Si se suscribe de inmediato, el canal se
+    // une con claims de `anon`, RLS no le devuelve filas de `reservas` y el
+    // módulo pierde el "en vivo" sin ningún error.
+    let cancelled = false;
+    const client = supabase;
+    void (async () => {
+      let accessToken: string | undefined;
+      try {
+        const {
+          data: { session },
+        } = await client.auth.getSession();
+        accessToken = session?.access_token;
+        if (accessToken) {
+          await client.realtime.setAuth(accessToken);
+        }
+      } catch (e) {
+        console.warn("[reservas realtime] no se pudo resolver la sesión", e);
+        return;
+      }
+
+      // Sin `await` entre esta guarda y la asignación de `channel`: el cleanup
+      // no puede colarse en el medio y dejar un canal huérfano.
+      if (cancelled || !accessToken) return;
+
+      channel = client
+        .channel(`reservas-table-${scopedHotelId}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "INSERT",
+            schema: "public",
+            table: "reservas",
+            filter: `hotel_id=eq.${scopedHotelId}`,
+          },
+          (payload) => void applyRealtimeRow(payload)
+        )
+        .on(
+          "postgres_changes",
+          {
+            event: "UPDATE",
+            schema: "public",
+            table: "reservas",
+            filter: `hotel_id=eq.${scopedHotelId}`,
+          },
+          (payload) => void applyRealtimeRow(payload)
+        )
+        .subscribe();
+    })();
 
     return () => {
+      cancelled = true;
       if (channel && supabase) {
         void supabase.removeChannel(channel);
       }

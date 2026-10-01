@@ -41,31 +41,55 @@ export function useReservasCount(hotelId: string | null | undefined) {
       return;
     }
 
-    channel = supabase
-      .channel(`reservas-count-${scopedHotelId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "reservas",
-          filter: `hotel_id=eq.${scopedHotelId}`,
-        },
-        () => void load()
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "reservas",
-          filter: `hotel_id=eq.${scopedHotelId}`,
-        },
-        () => void load()
-      )
-      .subscribe();
+    // Mismo patrón que useInboxRealtime: el token de sesión tiene que llegar al
+    // socket ANTES de unir el canal; si no, el canal entra como `anon` y RLS
+    // no le entrega ningún evento de `reservas`.
+    let cancelled = false;
+    const client = supabase;
+    void (async () => {
+      let accessToken: string | undefined;
+      try {
+        const {
+          data: { session },
+        } = await client.auth.getSession();
+        accessToken = session?.access_token;
+        if (accessToken) {
+          await client.realtime.setAuth(accessToken);
+        }
+      } catch (e) {
+        console.warn("[reservas count realtime] no se pudo resolver la sesión", e);
+        return;
+      }
+
+      if (cancelled || !accessToken) return;
+
+      channel = client
+        .channel(`reservas-count-${scopedHotelId}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "INSERT",
+            schema: "public",
+            table: "reservas",
+            filter: `hotel_id=eq.${scopedHotelId}`,
+          },
+          () => void load()
+        )
+        .on(
+          "postgres_changes",
+          {
+            event: "UPDATE",
+            schema: "public",
+            table: "reservas",
+            filter: `hotel_id=eq.${scopedHotelId}`,
+          },
+          () => void load()
+        )
+        .subscribe();
+    })();
 
     return () => {
+      cancelled = true;
       if (channel && supabase) {
         void supabase.removeChannel(channel);
       }
