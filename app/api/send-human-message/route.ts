@@ -9,6 +9,7 @@ import {
 import { readEngineError } from "@/lib/engine-error";
 import { DEFAULT_COMPOSER_LANGUAGE, normalizeLanguageCode } from "@/lib/language-names";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
+import { resolveConversationRecipient } from "@/lib/guest-identity-server";
 
 export const dynamic = "force-dynamic";
 
@@ -109,10 +110,13 @@ export async function POST(request: Request) {
       targetLang?: string | null;
     };
 
-    const guestPhone = body.guestPhone?.trim();
     const message = body.message?.trim();
-    if (!guestPhone || !message) {
-      return NextResponse.json({ error: "guestPhone y message son obligatorios" }, { status: 400 });
+    const conversationId = body.conversationId?.trim() || null;
+    if (!message || !conversationId) {
+      return NextResponse.json(
+        { error: "conversationId y message son obligatorios" },
+        { status: 400 }
+      );
     }
 
     const engineUrl = process.env.ENGINE_HUMAN_REPLY_URL;
@@ -150,21 +154,39 @@ export async function POST(request: Request) {
     // 2) ownership del conversationId → su hotel_id es el AUTORITATIVO.
     //    assertConversationInHotel hace: conversations.select("id, hotel_id")
     //    .eq("id", conversationId) y valida hotel_id ∈ allowedHotelIds.
-    const conversationId = body.conversationId?.trim() || null;
-    let hotelId: string;
-    if (conversationId) {
-      const ownership = await assertConversationInHotel(
-        tenant.supabase,
-        conversationId,
-        tenant.allowedHotelIds
+    //    La conversación es obligatoria: sin ella no hay forma de saber a quién
+    //    se le está escribiendo.
+    const ownership = await assertConversationInHotel(
+      tenant.supabase,
+      conversationId,
+      tenant.allowedHotelIds
+    );
+    if (ownership.response) return ownership.response;
+    const hotelId = ownership.hotelId;
+
+    // 2b) el destinatario sale de la conversación validada, NUNCA del body. El
+    //     `guestPhone` del body se acepta por compatibilidad, pero si apunta a
+    //     otro huésped no sale nada.
+    const recipient = await resolveConversationRecipient(
+      tenant.supabase,
+      conversationId,
+      hotelId,
+      body.guestPhone
+    );
+    if (!recipient.ok) {
+      console.error("[send-human-message] destinatario", recipient.code);
+      return NextResponse.json(
+        { error: "No se encontró el número del huésped de esta conversación" },
+        { status: recipient.status }
       );
-      if (ownership.response) return ownership.response;
-      hotelId = ownership.hotelId;
-    } else if (tenant.activeHotelId) {
-      hotelId = tenant.activeHotelId;
-    } else {
-      return NextResponse.json({ error: "hotelId es obligatorio" }, { status: 400 });
     }
+    if (recipient.bodyMismatch) {
+      return NextResponse.json(
+        { error: "El número del huésped no coincide con esta conversación. Recarga la conversación e intenta de nuevo." },
+        { status: 400 }
+      );
+    }
+    const guestPhone = recipient.engineTextIdentity;
 
     // 3) CANDADO DE IDEMPOTENCIA. Antes de tocar el engine: si ya existe una
     // fila saliente con este `client_temp_id` en este hotel, el mensaje YA le

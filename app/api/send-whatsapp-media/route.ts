@@ -3,6 +3,7 @@ import { requireSessionUser } from "@/lib/auth/require-user";
 import { assertConversationInHotel, requireActiveHotel } from "@/lib/auth/require-hotel";
 import { attachWamidByClientTempId, extractWamid } from "@/lib/outbound-wamid";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
+import { resolveConversationRecipient } from "@/lib/guest-identity-server";
 
 export const dynamic = "force-dynamic";
 
@@ -167,9 +168,6 @@ export async function POST(request: Request) {
     if (!conversationId) {
       return NextResponse.json({ error: "conversationId es obligatorio" }, { status: 400 });
     }
-    if (!toRaw) {
-      return NextResponse.json({ error: "to es obligatorio" }, { status: 400 });
-    }
     if (!(file instanceof File)) {
       return NextResponse.json({ error: "El archivo es obligatorio" }, { status: 400 });
     }
@@ -194,6 +192,29 @@ export async function POST(request: Request) {
     );
     if (ownership.response) return ownership.response;
     const hotelId = ownership.hotelId;
+
+    // 3) el destinatario sale de la conversación validada, NUNCA del formData.
+    //    El `to` se acepta por compatibilidad, pero si apunta a otro huésped no
+    //    se sube ni se envía nada.
+    const recipient = await resolveConversationRecipient(
+      tenant.supabase,
+      conversationId,
+      hotelId,
+      toRaw
+    );
+    if (!recipient.ok) {
+      console.error("[send-whatsapp-media] destinatario", recipient.code);
+      return NextResponse.json(
+        { error: "No se encontró el número del huésped de esta conversación" },
+        { status: recipient.status }
+      );
+    }
+    if (recipient.bodyMismatch) {
+      return NextResponse.json(
+        { error: "El número del huésped no coincide con esta conversación. Recarga la conversación e intenta de nuevo." },
+        { status: 400 }
+      );
+    }
 
     const engineUrl = resolveEngineMediaUrl();
     const sharedSecret = process.env.INBOX_SHARED_SECRET;
@@ -256,9 +277,10 @@ export async function POST(request: Request) {
       body: JSON.stringify({
         hotelId,
         conversationId,
-        // Crudo, tal como viene de la conversación: el engine es quien limpia la
-        // identidad (y un LID de Meta se rompe si se normaliza acá).
-        guestPhone: toRaw,
+        // De la fila de la conversación, con la misma regla que usaba el
+        // cliente: teléfono en dígitos o LID crudo (un LID se rompe si se le
+        // arrancan las letras). El engine termina de limpiar la identidad.
+        guestPhone: recipient.mediaIdentity,
         kind: whatsappType,
         link: signedData.signedUrl,
         filename,
