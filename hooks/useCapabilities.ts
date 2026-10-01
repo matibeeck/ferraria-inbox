@@ -2,6 +2,21 @@
 
 import { useEffect, useState } from "react";
 import type { CapabilityMap } from "@/lib/permissions";
+import { createInFlightSharer } from "@/lib/shared-in-flight";
+
+/**
+ * En la bandeja montan juntos el sidebar y la pantalla, y los dos piden sus
+ * capacidades: sin esto eran dos `/api/me` idénticos en el mismo instante. Se
+ * comparte solo la petición en vuelo; cada montaje posterior vuelve a preguntar.
+ */
+const shareInFlight = createInFlightSharer();
+
+async function fetchCapabilities(): Promise<CapabilityMap | null> {
+  const res = await fetch("/api/me", { cache: "no-store" });
+  if (!res.ok) return null;
+  const json = (await res.json()) as { capabilities?: CapabilityMap };
+  return json.capabilities ?? null;
+}
 
 /**
  * Capacidades del usuario, leídas de `/api/me`.
@@ -23,11 +38,9 @@ export function useCapabilities(): CapabilityMap | null {
 
     (async () => {
       try {
-        const res = await fetch("/api/me", { cache: "no-store" });
-        if (!res.ok) return;
-        const json = (await res.json()) as { capabilities?: CapabilityMap };
-        if (!cancelled && json.capabilities) {
-          setCapabilities(json.capabilities);
+        const next = await shareInFlight("me", fetchCapabilities);
+        if (!cancelled && next) {
+          setCapabilities(next);
         }
       } catch {
         // Silencioso: el fallback es "pintar lo de siempre".
