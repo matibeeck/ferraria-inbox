@@ -9,6 +9,7 @@ import { getSupabaseServerClient } from "@/lib/supabase-server";
 import { fetchHotelMessageTemplateByName } from "@/lib/message-templates";
 import { attachWamidToLatestOutbound, extractWamid } from "@/lib/outbound-wamid";
 import { normalizeColombianWhatsappNumber } from "@/lib/whatsapp-templates";
+import { readEngineError } from "@/lib/engine-error";
 
 export const dynamic = "force-dynamic";
 
@@ -20,28 +21,10 @@ const HOTELS_TABLE = "hotels";
 const TEMPLATES_DISABLED_ERROR = "Envío de plantillas deshabilitado para este hotel";
 
 /**
- * Mensaje de error del engine para mostrar al usuario. Prioriza
- * `error`/`message`/`detail` del JSON (incluido el anidado de Meta
- * `{ error: { message } }`), que viene curado.
- *
- * Si el cuerpo no es JSON o no trae ninguna de esas claves, devuelve un
- * genérico: el crudo puede ser un stack del engine y NO debe llegar al cliente
- * (queda en el `console.error` del servidor).
+ * Detalle crudo (cuerpo del engine, mensajes de excepción) solo en desarrollo:
+ * en producción puede traer teléfonos del payload de Meta o un stack.
  */
-function readEngineError(parsed: unknown): string {
-  if (parsed && typeof parsed === "object") {
-    const record = parsed as Record<string, unknown>;
-    for (const key of ["error", "message", "detail"]) {
-      const value = record[key];
-      if (typeof value === "string" && value.trim()) return value.trim();
-      if (value && typeof value === "object") {
-        const nested = (value as Record<string, unknown>).message;
-        if (typeof nested === "string" && nested.trim()) return nested.trim();
-      }
-    }
-  }
-  return GENERIC_TEMPLATE_ERROR;
-}
+const isDev = process.env.NODE_ENV !== "production";
 
 export async function POST(request: Request) {
   try {
@@ -181,8 +164,12 @@ export async function POST(request: Request) {
     }
 
     if (!res.ok) {
-      console.error("[send-whatsapp-template]", res.status, raw);
-      return NextResponse.json({ error: readEngineError(parsed) }, { status: 502 });
+      // En producción solo el status: el crudo puede traer el payload de Meta.
+      console.error("[send-whatsapp-template] engine", res.status, isDev ? raw : "");
+      return NextResponse.json(
+        { error: readEngineError(parsed, GENERIC_TEMPLATE_ERROR) },
+        { status: 502 }
+      );
     }
 
     // La fila "Human Template" la inserta quien envía (engine o n8n), así que
@@ -207,7 +194,13 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ ok: true, result: parsed });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Error desconocido";
-    return NextResponse.json({ error: msg }, { status: 500 });
+    console.error(
+      "[send-whatsapp-template] error inesperado",
+      isDev ? e : e instanceof Error ? e.name : "unknown"
+    );
+    return NextResponse.json(
+      { error: isDev && e instanceof Error ? e.message : GENERIC_TEMPLATE_ERROR },
+      { status: 500 }
+    );
   }
 }

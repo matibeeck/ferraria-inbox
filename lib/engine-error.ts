@@ -6,9 +6,8 @@
  * huésped o el payload de Meta con teléfonos adentro. Nada de eso puede
  * terminar en la pantalla de una recepcionista ni en los logs del servidor.
  *
- * `app/api/send-whatsapp-media` y `app/api/send-whatsapp-template` tienen cada
- * uno su copia local de esta misma lógica desde antes; quedan para una limpieza
- * aparte, sin tocar dos endpoints de envío en una tanda que no era de eso.
+ * `app/api/send-whatsapp-media` tiene su copia local de esta misma lógica desde
+ * antes; queda para una limpieza aparte.
  */
 
 /**

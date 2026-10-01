@@ -6,6 +6,9 @@ import { getSupabaseServerClient } from "@/lib/supabase-server";
 
 export const dynamic = "force-dynamic";
 
+/** El cuerpo del engine puede traer el resumen de la conversación: solo en dev. */
+const isDev = process.env.NODE_ENV !== "production";
+
 /**
  * Resumen devuelto por el engine de forma síncrona. Si el cuerpo no trae
  * `summary` (p. ej. rollback a un worker asíncrono), devolvemos `null` y el
@@ -73,7 +76,7 @@ export async function POST(request: Request) {
 
     const text = await res.text();
     if (!res.ok) {
-      console.error("[create-conversation-summary] engine", res.status, text);
+      console.error("[create-conversation-summary] engine", res.status, isDev ? text : "");
     }
 
     // El engine devuelve el resumen en el body; si no viene, el cliente cae a
