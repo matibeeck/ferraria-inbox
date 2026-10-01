@@ -32,13 +32,13 @@ export async function GET(request: Request) {
     const ownership = await assertConversationInHotel(supabase, conversationId, allowedHotelIds);
     if (ownership.response) return ownership.response;
 
-    // Doble candado: además de la conversación ya validada, el resumen tiene
-    // que ser del MISMO hotel. Filtro en el query, sin apoyarse en RLS.
+    // El candado es la conversación, ya validada contra el hotel. No se filtra
+    // por `hotel_id` del resumen: los resúmenes viejos (n8n) traen el default
+    // de la columna, no el hotel real, y quedarían ocultos.
     const { data, error: supabaseError } = await supabase
       .from("conversation_summaries")
       .select("summary")
       .eq("conversation_id", conversationId)
-      .eq("hotel_id", ownership.hotelId)
       .maybeSingle();
 
     if (supabaseError) {
