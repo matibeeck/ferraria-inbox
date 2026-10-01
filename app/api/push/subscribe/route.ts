@@ -55,6 +55,35 @@ export async function POST(request: Request) {
 
     const userAgent = request.headers.get("user-agent")?.slice(0, 500) ?? null;
 
+    // Dueño del endpoint. La columna es UNIQUE sola, así que el upsert de abajo
+    // le reasignaría a este usuario la suscripción de otro con solo conocer la
+    // URL. Se deja pasar el traspaso únicamente si trae las MISMAS claves
+    // (`p256dh` + `auth`), que solo tiene el navegador que la creó: es el caso
+    // del computador compartido de recepción, donde otra persona inicia sesión
+    // en el mismo navegador.
+    const { data: existing, error: existingError } = await supabase
+      .from(TABLE)
+      .select("user_id, p256dh, auth")
+      .eq("endpoint", endpoint)
+      .maybeSingle<{ user_id: string; p256dh: string; auth: string }>();
+    if (existingError) {
+      return apiError(502, "push_subscribe_failed", {
+        cause: existingError,
+        log: "[push/subscribe POST] lookup",
+        message: "No se pudo guardar la suscripción",
+      });
+    }
+    if (
+      existing &&
+      existing.user_id !== auth.user.id &&
+      (existing.p256dh !== p256dh || existing.auth !== authKey)
+    ) {
+      return NextResponse.json(
+        { error: "Esta suscripción de notificaciones pertenece a otro usuario", code: "push_endpoint_taken" },
+        { status: 409 }
+      );
+    }
+
     // Upsert por endpoint: un mismo navegador se re-suscribe sin duplicar filas.
     const { error } = await supabase
       .from(TABLE)

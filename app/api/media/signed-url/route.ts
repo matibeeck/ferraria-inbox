@@ -32,8 +32,6 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "bucket inválido" }, { status: 400 });
   }
 
-  const bucket = bucketParam || defaultMediaBucket();
-
   try {
     const supabase = getSupabaseServerClient();
 
@@ -43,6 +41,13 @@ export async function GET(request: Request) {
     const allowedHotelIds = gate.allowedHotelIds;
     const ownership = await assertStoragePathInHotel(supabase, path, allowedHotelIds);
     if (ownership.response) return ownership.response;
+
+    // El bucket sale de la MISMA fila que validó el hotel (o del default del
+    // servidor), nunca del cliente: el `?bucket=` se sigue aceptando por
+    // compatibilidad pero no decide nada. Misma regla que la firma en lote de
+    // `GET /api/inbox/messages`.
+    const rowBucket = ownership.bucket;
+    const bucket = rowBucket && VALID_BUCKET_RE.test(rowBucket) ? rowBucket : defaultMediaBucket();
 
     const { data, error } = await supabase
       .storage

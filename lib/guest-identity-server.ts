@@ -1,3 +1,4 @@
+import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { normalizeChannel, pickEngineIdentity } from "@/lib/channels";
 import { normalizeGuestIdentityKey } from "@/lib/chat-utils";

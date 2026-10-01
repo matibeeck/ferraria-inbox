@@ -6,6 +6,7 @@ import {
   type CapabilityMap,
 } from "./permissions.ts";
 import { memoPerRequest } from "./request-memo.ts";
+import { isDev } from "./api-error-body.ts";
 
 const HOTEL_USERS_TABLE = "hotel_users";
 const HOTELS_TABLE = "hotels";
@@ -213,9 +214,9 @@ async function loadTenantContext(supabase: SupabaseClient, user: User): Promise<
  * absorber en silencio: el recorte se aplica igual, pero sin el log un usuario
  * quedaría a medias sin que nadie se entere.
  *
- * Loguea `user_id` y los `hotel_id` recortados. Es metadata de configuración de
- * personal, no contenido de huéspedes, así que no cae bajo la regla de no
- * loguear datos. El recorte NUNCA depende de que este log salga.
+ * Loguea los `hotel_id` recortados y los roles, que son configuración de
+ * personal y no datos de huéspedes. El `user_id` solo sale en desarrollo. El
+ * recorte NUNCA depende de que este log salga.
  */
 function warnOnMixedRoles(
   user: User,
@@ -230,7 +231,7 @@ function warnOnMixedRoles(
   console.warn(
     "[inbox-tenant] roles mezclados entre hoteles: se recortan los hoteles sin acceso a datos de huéspedes",
     {
-      user_id: user.id,
+      ...(isDev ? { user_id: user.id } : {}),
       hotel_ids_recortados: sinDatosDeHuesped,
       roles: memberships.map((m) => ({ hotel_id: m.hotelId, role: m.role })),
     }

@@ -1,3 +1,6 @@
+// Este módulo lleva la service role: si algún componente de cliente lo importa,
+// el build falla en vez de mandar la llave al navegador.
+import "server-only";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 /**

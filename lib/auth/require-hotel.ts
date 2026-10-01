@@ -168,17 +168,26 @@ export function assertConversationInHotel(
  * que validamos esa fila — funciona igual para media entrante (n8n) y saliente
  * (esta app), sin depender del formato del nombre del objeto.
  */
+export type StorageOwnershipResult =
+  | { response: NextResponse; hotelId: null; bucket: null }
+  | {
+      response: null;
+      hotelId: string;
+      /** `media_bucket` de la fila; `null` si no trae → bucket por defecto. */
+      bucket: string | null;
+    };
+
 export async function assertStoragePathInHotel(
   supabase: SupabaseClient,
   storagePath: string,
   allowedHotelIds: string[]
-): Promise<HotelOwnershipResult> {
+): Promise<StorageOwnershipResult> {
   // Lookups .eq parametrizados (sin inyección PostgREST: el path es del cliente).
-  let row: { hotel_id?: string | null } | null = null;
+  let row: { hotel_id?: string | null; media_bucket?: string | null } | null = null;
   for (const column of ["media_storage_path", "storage_path"] as const) {
     const { data, error } = await supabase
       .from(WUBBY_TABLE)
-      .select("hotel_id")
+      .select("hotel_id, media_bucket")
       .eq(column, storagePath)
       .limit(1)
       .maybeSingle();
@@ -191,6 +200,7 @@ export async function assertStoragePathInHotel(
           message: "No se pudo verificar el acceso a este archivo",
         }),
         hotelId: null,
+        bucket: null,
       };
     }
     if (data) {
@@ -200,11 +210,20 @@ export async function assertStoragePathInHotel(
   }
 
   if (!row) {
-    return { response: NextResponse.json({ error: "Recurso no encontrado" }, { status: 404 }), hotelId: null };
+    return {
+      response: NextResponse.json({ error: "Recurso no encontrado" }, { status: 404 }),
+      hotelId: null,
+      bucket: null,
+    };
   }
   const hotelId = row.hotel_id != null ? String(row.hotel_id).trim() : "";
   if (!hotelId || !allowedHotelIds.includes(hotelId)) {
-    return { response: NextResponse.json({ error: "No autorizado para este hotel" }, { status: 403 }), hotelId: null };
+    return {
+      response: NextResponse.json({ error: "No autorizado para este hotel" }, { status: 403 }),
+      hotelId: null,
+      bucket: null,
+    };
   }
-  return { response: null, hotelId };
+  const bucket = typeof row.media_bucket === "string" ? row.media_bucket.trim() : "";
+  return { response: null, hotelId, bucket: bucket || null };
 }
