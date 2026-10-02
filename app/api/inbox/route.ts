@@ -7,6 +7,7 @@ import {
   hotelWhatsappMapToRecord,
 } from "@/lib/hotel-whatsapp-map";
 import { buildReactivateAiFields } from "@/lib/inbox-patch";
+import { reactivarIaPorEngine } from "@/lib/engine-reactivate-ai-server";
 import {
   availableHotelsFrom,
   resolveActiveHotelId,
@@ -691,6 +692,33 @@ export async function PATCH(request: Request) {
     const allowedHotelIds = gate.allowedHotelIds;
     const ownership = await assertConversationInHotel(supabase, conversationId, allowedHotelIds);
     if (ownership.response) return ownership.response;
+
+    // "Reactivar IA" va primero por el engine: escribe el mismo estado y, si el
+    // huésped dejó mensajes sin contestar durante la pausa, corre un turno
+    // normal del agente sobre ellos (antes quedaban sin respuesta para siempre).
+    // Si el engine no lo hace —engine viejo sin el endpoint, hotel en n8n,
+    // caído, timeout—, se sigue al UPDATE directo de siempre. Esa escritura
+    // repite el mismo estado y no encola nada, así que no puede duplicar una
+    // respuesta aunque el engine haya alcanzado a terminar.
+    if (action === "reactivate_ai") {
+      const viaEngine = await reactivarIaPorEngine({ conversationId, hotelId: ownership.hotelId });
+      if (viaEngine.ok) {
+        const { data: row, error: readError } = await supabase
+          .from(CONVERSATIONS_TABLE)
+          .select(CONVERSATION_SELECT_COLUMNS)
+          .eq("id", conversationId)
+          .eq("hotel_id", ownership.hotelId)
+          .maybeSingle();
+        if (!readError && row) {
+          return NextResponse.json({ ok: true, conversationId, action, conversation: row });
+        }
+        // Sin la fila no hay qué devolverle al cliente: el UPDATE de abajo la
+        // trae (y escribe lo mismo que ya escribió el engine).
+      } else {
+        // Sin PII: solo el código. En hoteles de n8n esto es lo esperado (409).
+        console.warn("[inbox PATCH] reactivate_ai sin engine, escritura directa", viaEngine.motivo);
+      }
+    }
 
     // `returning=representation` con las columnas de bandeja: la fila resultante
     // es POST-update, así que trae también los campos derivados que el `patch` no
