@@ -13,6 +13,7 @@ function getPostHogClient(): PostHog | null {
         "NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN variable required by PostHog is missing or un-configured, this causes events to be silently missed. This error stops appearing once NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN is configured"
       );
     }
+    console.warn("[posthog-ai] falta NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN en el servidor: no se envían eventos");
     posthogClient = null;
     return posthogClient;
   }
@@ -24,6 +25,7 @@ function getPostHogClient(): PostHog | null {
         "NEXT_PUBLIC_POSTHOG_HOST variable required by PostHog is missing or un-configured, this causes events to be silently missed. This error stops appearing once NEXT_PUBLIC_POSTHOG_HOST is configured"
       );
     }
+    console.warn("[posthog-ai] falta NEXT_PUBLIC_POSTHOG_HOST en el servidor: no se envían eventos");
     posthogClient = null;
     return posthogClient;
   }
@@ -57,7 +59,10 @@ export async function captureConversationSummaryGeneration(input: {
   if (!posthog) return;
 
   try {
-    posthog.capture({
+    // `capture` prepara el evento en segundo plano y lo encola después: un
+    // `flush` justo detrás encuentra la cola vacía y Vercel congela la función
+    // antes de que salga. `captureImmediate` resuelve cuando PostHog lo recibió.
+    await posthog.captureImmediate({
       distinctId: input.distinctId,
       event: "$ai_generation",
       groups: { hotel: input.hotelId },
@@ -72,7 +77,6 @@ export async function captureConversationSummaryGeneration(input: {
         summary_available: input.summaryAvailable,
       },
     });
-    await posthog.flush();
   } catch (error) {
     console.error("[posthog-ai] conversation summary capture failed", error);
   }
