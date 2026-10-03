@@ -2,10 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import type {
-  RealtimeChannel,
-  RealtimePostgresChangesPayload,
-} from "@supabase/supabase-js";
+import type { RealtimeChannel } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/client";
 import {
   CONVERSATIONS_TABLE,
@@ -14,6 +11,13 @@ import {
 import { upsertConversationMessage } from "@/lib/message-upsert";
 import { truncateListPreview } from "@/lib/inbox-preview";
 import { WUBBY_TABLE, type WubbyWhatsappRow } from "@/lib/wubby-schema";
+import {
+  ROW_CHANGE_EVENTS,
+  type RowChange,
+  type RowChangeEvent,
+  hotelRealtimeTopic,
+  toRowChange,
+} from "@/lib/realtime-broadcast";
 import {
   type HotelWhatsappByIdMap,
   readRowHotelId,
@@ -32,8 +36,8 @@ import {
 
 type SetConversations = Dispatch<SetStateAction<Conversation[]>>;
 
-type ConversationsPayload = RealtimePostgresChangesPayload<ConversationDbRow>;
-type WubbyPayload = RealtimePostgresChangesPayload<WubbyWhatsappRow>;
+type ConversationsPayload = RowChange<ConversationDbRow>;
+type WubbyPayload = RowChange<WubbyWhatsappRow>;
 
 /**
  * Estado visible del chip de conexión Realtime en la barra superior.
@@ -100,8 +104,8 @@ const FOLLOWUP_COLUMNS = [
  * ninguna de esas columnas con valor (sin cotización ni seguimiento).
  *
  * Se compara contra la última huella vista de la misma conversación en vez de
- * contra `payload.old`: sin `REPLICA IDENTITY FULL`, `payload.old` de un UPDATE
- * trae solo la PK y no dice qué cambió.
+ * contra `payload.old`: así no depende de cómo llegue la fila vieja (con
+ * postgres_changes traía solo la PK; con Broadcast viene completa).
  */
 function followupSignature(row: Record<string, unknown>): string | null {
   const values = FOLLOWUP_COLUMNS.map((column) => row[column] ?? null);
@@ -295,9 +299,9 @@ export function useInboxRealtime({
   }, []);
 
   /**
-   * Hotel del canal. Con él se filtran las suscripciones en el servidor: antes
-   * iban sin filtro y Realtime evaluaba cada cambio de CUALQUIER hotel contra
-   * la RLS de cada suscriptor, para que el cliente lo descartara después.
+   * Hotel del canal. Cada hotel tiene su propio topic privado `hotel:<id>`: el
+   * trigger solo emite ahí los cambios de ese hotel, y la policy de
+   * `realtime.messages` solo deja entrar a quien puede leer sus huéspedes.
    */
   const channelHotelId = activeHotelId?.trim() || null;
 
@@ -308,7 +312,6 @@ export function useInboxRealtime({
       onConnRef.current?.("waiting");
       return;
     }
-    const hotelFilter = `hotel_id=eq.${channelHotelId}`;
 
     if (process.env.NODE_ENV === "development") {
       for (const n of activeDesktopNotificationsRef.current.values()) {
@@ -661,7 +664,7 @@ export function useInboxRealtime({
       );
     };
 
-    const handleWubbyPostgresChange = (payload: WubbyPayload) => {
+    const handleWubbyChange = (payload: WubbyPayload) => {
       const et = payload.eventType;
       if (et === "INSERT") {
         handleWubbyInsert(payload);
@@ -676,8 +679,8 @@ export function useInboxRealtime({
 
     // El join adjunta el access_token solo si `realtime.setAuth()` ya corrió, y
     // `createBrowserClient` resuelve la sesión de forma asíncrona: suscribir de
-    // inmediato puede unir el canal con claims de `anon`. Hoy es invisible
-    // (policy RLS abierta); con RLS cerrada ese canal no recibiría nada.
+    // inmediato uniría el canal privado con claims de `anon`, y la policy de
+    // `realtime.messages` lo rechazaría.
     const client = supabase;
     void (async () => {
       let accessToken: string | undefined;
@@ -709,53 +712,31 @@ export function useInboxRealtime({
         return;
       }
 
-      const onConversation = handleConversationEvent as (
-        payload: RealtimePostgresChangesPayload<Record<string, unknown>>
-      ) => void;
-      const onWubby = handleWubbyPostgresChange as (
-        payload: RealtimePostgresChangesPayload<Record<string, unknown>>
-      ) => void;
+      // Un solo topic privado por hotel lleva los cambios de las dos tablas;
+      // `payload.table` decide a qué handler va. El trigger solo emite al
+      // topic del hotel de la fila, así que aquí no hace falta filtrar por
+      // hotel, y el DELETE llega con la fila vieja completa.
+      const onRowChange = (event: RowChangeEvent, raw: unknown) => {
+        const parsed = toRowChange(event, raw);
+        if (!parsed) return;
+        if (parsed.table === CONVERSATIONS_TABLE) {
+          handleConversationEvent(parsed.change as ConversationsPayload);
+        } else if (parsed.table === WUBBY_TABLE) {
+          handleWubbyChange(parsed.change as WubbyPayload);
+        }
+      };
 
-      // INSERT y UPDATE van filtrados por hotel en el servidor. DELETE va SIN
-      // filtro a propósito: sin `REPLICA IDENTITY FULL` la fila borrada llega
-      // solo con la PK, el servidor no puede evaluar `hotel_id` y el evento se
-      // perdería. Los handlers de DELETE solo quitan por id lo que ya está en
-      // pantalla, así que un borrado de otro hotel no cambia nada visible.
-      //
       // Nombre por hotel: `client.channel()` devuelve el canal existente si el
       // nombre coincide, y el `removeChannel` del canal anterior es async.
-      channel = client
-        .channel(`inbox-realtime:${channelHotelId}`)
-        .on(
-          "postgres_changes",
-          { event: "INSERT", schema: "public", table: CONVERSATIONS_TABLE, filter: hotelFilter },
-          onConversation
-        )
-        .on(
-          "postgres_changes",
-          { event: "UPDATE", schema: "public", table: CONVERSATIONS_TABLE, filter: hotelFilter },
-          onConversation
-        )
-        .on(
-          "postgres_changes",
-          { event: "DELETE", schema: "public", table: CONVERSATIONS_TABLE },
-          onConversation
-        )
-        .on(
-          "postgres_changes",
-          { event: "INSERT", schema: "public", table: WUBBY_TABLE, filter: hotelFilter },
-          onWubby
-        )
-        .on(
-          "postgres_changes",
-          { event: "UPDATE", schema: "public", table: WUBBY_TABLE, filter: hotelFilter },
-          onWubby
-        )
-        .on(
-          "postgres_changes",
-          { event: "DELETE", schema: "public", table: WUBBY_TABLE },
-          onWubby
-        )
+      let builder = client.channel(hotelRealtimeTopic(channelHotelId), {
+        config: { private: true },
+      });
+      for (const event of ROW_CHANGE_EVENTS) {
+        builder = builder.on("broadcast", { event }, (message) => {
+          onRowChange(event, message.payload);
+        });
+      }
+      channel = builder
         .subscribe((status, err) => {
           // Al desmontar, el `removeChannel` del cleanup dispara `CLOSED`. Sin
           // esta guarda ese cierre normal pintaba el chip en rojo justo cuando
