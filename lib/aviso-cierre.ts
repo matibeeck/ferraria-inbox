@@ -25,6 +25,15 @@ import type { TicketEstado } from "./service-tickets.ts";
 export const CLAVE_AVISO_CIERRE = "service_tickets_aviso_cierre_enabled";
 
 /**
+ * Cuánto hacia atrás desde el momento de resolver cuenta un mensaje de
+ * recepción para frenar el aviso. Decisión de Matías (2026-10-03): si
+ * recepción le escribió hace un rato, el "¡Listo!" sobra; si le escribió ayer,
+ * el huésped no se enteró de que su solicitud quedó resuelta y sí hay que
+ * avisarle.
+ */
+export const VENTANA_YA_LE_ESCRIBIERON_MS = 2 * 60 * 60 * 1000;
+
+/**
  * ¿Está activado el aviso en este hotel?
  *
  * Ausente = ACTIVADO. Solo el booleano `false` lo apaga: un jsonb sin fila, sin
@@ -112,7 +121,11 @@ export type EntradaAvisoCierre = {
     channel: string | null;
     blocked: boolean | null;
   } | null;
-  /** Último `Human Answer`/`Human Template` saliente (`Wubby_Whatsapp.created_at`, hora Bogotá sin zona). */
+  /**
+   * Último `Human Answer`/`Human Template` saliente de la conversación
+   * (`Wubby_Whatsapp.created_at`, hora Bogotá sin zona). Frena el aviso solo si
+   * es posterior al ticket y de las últimas 2 h antes de `ahoraMs`.
+   */
   ultimoHumanoSalienteAt: string | null;
   /** `conversations.last_guest_message_at` (timestamptz). */
   ultimoEntranteColumnaAt: string | null;
@@ -169,8 +182,18 @@ export function decidirAvisoCierre(entrada: EntradaAvisoCierre): DecisionAvisoCi
   const ticketMs = parseWhatsappInstantMs(entrada.ticket.created_at);
   if (ticketMs === null) return { enviar: false, motivo: "no_verificado" };
 
+  // Frena solo un mensaje de recepción que cumpla las DOS: posterior a la
+  // creación del ticket (uno anterior no habla de esta solicitud) y de las
+  // últimas 2 h antes de resolver (uno de ayer no le dijo que quedó lista).
+  // Basta con mirar el ÚLTIMO mensaje humano: si ese no cae en el rango,
+  // ninguno anterior cae. Uno con hora posterior a "ahora" (relojes corridos)
+  // cuenta como reciente: ante la duda no se duplica.
   const humanoMs = parseWhatsappInstantMs(entrada.ultimoHumanoSalienteAt);
-  if (humanoMs !== null && humanoMs > ticketMs) {
+  if (
+    humanoMs !== null &&
+    humanoMs > ticketMs &&
+    entrada.ahoraMs - humanoMs <= VENTANA_YA_LE_ESCRIBIERON_MS
+  ) {
     return { enviar: false, motivo: "ya_le_escribieron" };
   }
 
@@ -211,7 +234,7 @@ export type AvisoCierre = { enviado: boolean; motivo?: MotivoSinAviso };
 /**
  * Motivos que NO dicen nada de la conversación del huésped. Son los únicos que
  * puede ver alguien sin acceso a datos de huéspedes (p. ej. un operativo de
- * mantenimiento): "recepción ya le escribió" o "pasaron más de 24 h desde su
+ * mantenimiento): "recepción le escribió hace poco" o "pasaron más de 24 h desde su
  * último mensaje" ya son datos de la conversación.
  */
 const MOTIVOS_SIN_DATOS_DEL_HUESPED: ReadonlySet<MotivoSinAviso> = new Set([
@@ -232,7 +255,7 @@ export function mensajeAvisoParaRecepcion(aviso: AvisoCierre): string {
   if (aviso.enviado) return "Se le avisó al huésped";
   switch (aviso.motivo) {
     case "ya_le_escribieron":
-      return "No se avisó: recepción ya le escribió";
+      return "No se avisó: recepción le escribió hace menos de 2 h";
     case "fuera_de_ventana":
       return "No se avisó: pasaron más de 24 h desde su último mensaje";
     case "desactivado_hotel":

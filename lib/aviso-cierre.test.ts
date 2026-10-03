@@ -167,11 +167,13 @@ test("zona horaria: ticket con offset y Wubby sin zona en el mismo instante no c
   assert.equal(d?.enviar, true);
 });
 
-test("caso Tigo 2026-10-03: el Human Answer de las 11:02 Bogotá es POSTERIOR a tickets de las 16:00Z", () => {
+test("caso Tigo 2026-10-03: un Human Answer de ~19 h antes de resolver ya NO frena el aviso", () => {
   // Datos reales: tickets creados a las 16:00:25Z y 16:01:59Z; recepción le
   // escribió a las 11:02:21 hora Bogotá (16:02:21Z), 22 s después del segundo.
-  // Leído como "11:02 < 16:00" parece anterior, y no lo es. Resueltos a las
-  // 11:40Z del día siguiente con el huésped dentro de la ventana de 24 h.
+  // Se resolvieron a las 11:40:56Z del día siguiente, con el huésped dentro de
+  // la ventana de 24 h. Ese mensaje es posterior al ticket pero de hace más de
+  // 2 h al resolver: el huésped nunca se enteró de que quedó lista, así que SÍ
+  // se le avisa (decisión de Matías, 2026-10-03).
   const base = {
     ultimoHumanoSalienteAt: "2026-10-02T11:02:21.81701",
     ultimoEntranteColumnaAt: "2026-10-03T01:14:55+00:00",
@@ -180,13 +182,34 @@ test("caso Tigo 2026-10-03: el Human Answer de las 11:02 Bogotá es POSTERIOR a 
   };
   for (const created_at of ["2026-10-02T16:01:59.592536+00:00", "2026-10-02T16:00:25.847246+00:00"]) {
     const d = decidirAvisoCierre(entrada({ ...base, ticket: { ...entrada().ticket, created_at } }));
-    assert.deepEqual(d, { enviar: false, motivo: "ya_le_escribieron" }, created_at);
+    assert.equal(d?.enviar, true, created_at);
   }
-  // Sin ese mensaje de recepción, los mismos tickets SÍ avisan: la ventana estaba abierta.
-  const sinHumano = decidirAvisoCierre(
-    entrada({ ...base, ultimoHumanoSalienteAt: null, ticket: { ...entrada().ticket, created_at: "2026-10-02T16:01:59.592536+00:00" } })
+});
+
+test("ventana de 2 h: recepción le escribió hace 30 min (después del ticket) → no se avisa", () => {
+  // Ticket 15:00Z, resolver 16:00Z. Humano 10:30 Bogotá = 15:30Z.
+  const d = decidirAvisoCierre(entrada({ ultimoHumanoSalienteAt: "2026-09-30T10:30:00" }));
+  assert.deepEqual(d, { enviar: false, motivo: "ya_le_escribieron" });
+});
+
+test("ventana de 2 h: recepción le escribió hace 2 h 1 min → sí se avisa; justo 2 h todavía frena", () => {
+  // Ticket 15:00Z, resolver 18:00Z, huésped escribió a las 14:55Z.
+  const ahoraMs = Date.parse("2026-09-30T18:00:00Z");
+  // 10:59 Bogotá = 15:59Z: posterior al ticket y 2 h 1 min antes de resolver.
+  const viejo = decidirAvisoCierre(entrada({ ahoraMs, ultimoHumanoSalienteAt: "2026-09-30T10:59:00" }));
+  assert.equal(viejo?.enviar, true);
+  // 11:00 Bogotá = 16:00Z: exactamente 2 h antes, todavía cuenta.
+  const borde = decidirAvisoCierre(entrada({ ahoraMs, ultimoHumanoSalienteAt: "2026-09-30T11:00:00" }));
+  assert.deepEqual(borde, { enviar: false, motivo: "ya_le_escribieron" });
+});
+
+test("ventana de 2 h: un humano dentro de las 2 h pero ANTERIOR al ticket no cuenta", () => {
+  // Ticket 15:00Z, resolver 15:30Z. Humano 09:50 Bogotá = 14:50Z: 40 min antes
+  // de resolver, pero 10 min antes de que existiera la solicitud.
+  const d = decidirAvisoCierre(
+    entrada({ ahoraMs: Date.parse("2026-09-30T15:30:00Z"), ultimoHumanoSalienteAt: "2026-09-30T09:50:00" })
   );
-  assert.equal(sinHumano?.enviar, true);
+  assert.equal(d?.enviar, true);
 });
 
 test("fuera_de_ventana: último entrante hace más de 24 h", () => {
@@ -287,7 +310,7 @@ test("copy para recepción: cada motivo tiene su frase, sin genéricos", () => {
   assert.equal(mensajeAvisoParaRecepcion({ enviado: true }), "Se le avisó al huésped");
   assert.equal(
     mensajeAvisoParaRecepcion({ enviado: false, motivo: "ya_le_escribieron" }),
-    "No se avisó: recepción ya le escribió"
+    "No se avisó: recepción le escribió hace menos de 2 h"
   );
   assert.equal(
     mensajeAvisoParaRecepcion({ enviado: false, motivo: "fuera_de_ventana" }),

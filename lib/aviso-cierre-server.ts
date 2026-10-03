@@ -152,7 +152,9 @@ export async function avisarCierreAlHuesped(params: {
 
     if (valeLeerHilo && guestPhone && identidades.length > 0 && filtroConversacion) {
       const [humano, entrante] = await Promise.all([
-        // Último mensaje de recepción en ESTA conversación. Por
+        // Último mensaje de recepción en ESTA conversación (si frena o no lo
+        // decide la función pura: solo si es posterior al ticket y de las
+        // últimas 2 h; con el último alcanza para saberlo). Por
         // `conversation_id` y, de respaldo, por el teléfono del huésped como
         // destinatario: las filas que escribe n8n pueden venir sin
         // `conversation_id` y no se pueden perder para el dedupe.
