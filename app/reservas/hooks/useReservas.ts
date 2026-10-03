@@ -11,6 +11,7 @@ import {
   type ReservaActionResponse,
   type ReservasAvailableHotel,
   type ReservasListResponse,
+  type ReservasTab,
 } from "../lib/types";
 
 type ReservaRealtimeRow = {
@@ -20,7 +21,7 @@ type ReservaRealtimeRow = {
   titular_nombre?: string | null;
 };
 
-function buildReservasUrl(tab: "pendientes" | "procesadas", hotelId: string | null) {
+function buildReservasUrl(tab: ReservasTab, hotelId: string | null) {
   const params = new URLSearchParams({ tab });
   if (hotelId) {
     params.set("hotelId", hotelId);
@@ -48,7 +49,7 @@ function upsertReserva(list: Reserva[], reserva: Reserva, tab: "pendientes" | "p
   return tab === "pendientes" ? sortPendientes(withReserva) : sortProcesadas(withReserva);
 }
 
-async function fetchReservas(tab: "pendientes" | "procesadas", hotelId: string | null) {
+async function fetchReservas(tab: ReservasTab, hotelId: string | null) {
   const response = await fetch(buildReservasUrl(tab, hotelId), { cache: "no-store" });
   const payload = (await response.json()) as ReservasListResponse;
   if (!response.ok) throw new Error(payload.error ?? "No se pudieron cargar las reservas");
@@ -64,6 +65,12 @@ export function useReservas(options?: UseReservasOptions) {
   const requestedHotelId = options?.activeHotelId ?? null;
   const [pendientes, setPendientes] = useState<Reserva[]>([]);
   const [procesadas, setProcesadas] = useState<Reserva[]>([]);
+  const [archivadas, setArchivadas] = useState<Reserva[]>([]);
+  /**
+   * Error propio de Archivadas. Va aparte a propósito: es la pestaña nueva y
+   * la menos usada, y una falla ahí no puede dejar a recepción sin Pendientes.
+   */
+  const [archivadasError, setArchivadasError] = useState<string | null>(null);
   const [availableHotels, setAvailableHotels] = useState<ReservasAvailableHotel[]>([]);
   const [resolvedActiveHotelId, setResolvedActiveHotelId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -80,12 +87,27 @@ export function useReservas(options?: UseReservasOptions) {
       setError(null);
     }
     try {
+      const archivedPromise = fetchReservas("archivadas", requestedHotelId);
+      // Se engancha ya para que un rechazo mientras esperamos las otras dos no
+      // quede como promesa sin manejar.
+      archivedPromise.catch(() => undefined);
       const [pendingPayload, processedPayload] = await Promise.all([
         fetchReservas("pendientes", requestedHotelId),
         fetchReservas("procesadas", requestedHotelId),
       ]);
       setPendientes(pendingPayload.reservas ?? []);
       setProcesadas(processedPayload.reservas ?? []);
+      try {
+        const archivedPayload = await archivedPromise;
+        setArchivadas(archivedPayload.reservas ?? []);
+        setArchivadasError(null);
+      } catch (e) {
+        // En el refresco silencioso se conserva la última lista buena.
+        if (!silent) setArchivadas([]);
+        setArchivadasError(
+          e instanceof Error ? e.message : "No se pudieron cargar las reservas archivadas"
+        );
+      }
       setAvailableHotels(
         pendingPayload.availableHotels ?? processedPayload.availableHotels ?? []
       );
@@ -234,6 +256,7 @@ export function useReservas(options?: UseReservasOptions) {
       throw new Error(payload.error ?? "No se pudo devolver la reserva a pendientes");
     }
     setProcesadas((prev) => prev.filter((item) => item.id !== id));
+    setArchivadas((prev) => prev.filter((item) => item.id !== id));
     setPendientes((prev) => upsertReserva(prev, payload.reserva!, "pendientes"));
     return payload.reserva;
   }, []);
@@ -241,6 +264,8 @@ export function useReservas(options?: UseReservasOptions) {
   return {
     pendientes,
     procesadas,
+    archivadas,
+    archivadasError,
     pendingCount: pendientes.length,
     loading,
     error,

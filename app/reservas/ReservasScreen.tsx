@@ -12,6 +12,7 @@ import { ReservaDetalle } from "./components/ReservaDetalle";
 import { ReopenModal } from "./components/ReopenModal";
 import { TabsHeader } from "./components/TabsHeader";
 import { useReservas } from "./hooks/useReservas";
+import { esArchivada } from "@/lib/reservas-estado";
 import { formatCOT } from "./lib/formatters";
 import type { Reserva, ReservasTab } from "./lib/types";
 
@@ -48,6 +49,8 @@ export function ReservasScreen() {
   const {
     pendientes,
     procesadas,
+    archivadas,
+    archivadasError,
     pendingCount,
     loading,
     error,
@@ -71,7 +74,33 @@ export function ReservasScreen() {
     }
   }, [resolvedActiveHotelId, activeHotelId]);
 
-  const visibleReservas = activeTab === "pendientes" ? pendientes : procesadas;
+  const visibleReservas =
+    activeTab === "pendientes" ? pendientes : activeTab === "procesadas" ? procesadas : archivadas;
+
+  /**
+   * La reserva abierta, leída de las listas recién cargadas y no de la copia
+   * que se guardó al tocar la tarjeta. Si el engine la reemplaza o la cancela
+   * mientras recepción la mira, el detalle cambia solo de estado y de botones,
+   * en vez de seguir ofreciendo "Completar" sobre una reserva vieja.
+   */
+  const reservaAbierta = useMemo(() => {
+    if (!selectedReserva) return null;
+    const id = selectedReserva.id;
+    return (
+      pendientes.find((r) => r.id === id) ??
+      procesadas.find((r) => r.id === id) ??
+      archivadas.find((r) => r.id === id) ??
+      selectedReserva
+    );
+  }, [selectedReserva, pendientes, procesadas, archivadas]);
+
+  /** El enlace "Reemplazada por…": abre la nueva en la pestaña donde vive. */
+  const handleOpenReserva = useCallback((reserva: Reserva) => {
+    if (reserva.status === "pendiente") setActiveTab("pendientes");
+    else if (reserva.status === "completada" || reserva.status === "rechazada") setActiveTab("procesadas");
+    else if (esArchivada(reserva.status)) setActiveTab("archivadas");
+    setSelectedReserva(reserva);
+  }, []);
   const phoneQueryDigits = normalizePhoneDigits(phoneQuery);
   const filteredReservas = useMemo(() => {
     if (!phoneQueryDigits) return visibleReservas;
@@ -81,9 +110,12 @@ export function ReservasScreen() {
     });
   }, [phoneQueryDigits, visibleReservas]);
 
-  const emptyMessage = activeTab === "pendientes"
-    ? "No hay reservas pendientes por procesar."
-    : "No hay reservas procesadas recientes.";
+  const emptyMessage =
+    activeTab === "pendientes"
+      ? "No hay reservas pendientes por procesar."
+      : activeTab === "procesadas"
+        ? "No hay reservas procesadas recientes."
+        : archivadasError ?? "No hay reservas canceladas ni reemplazadas.";
   const noPhoneMatchMessage = "No hay reservas que coincidan con ese teléfono.";
 
   const selectedStillVisible = useMemo(
@@ -114,6 +146,8 @@ export function ReservasScreen() {
       addToast(`Reserva ${formatCOT(reserva.quote_request_id)} marcada como procesada`);
     } catch (e) {
       addToast(e instanceof Error ? e.message : "No se pudo completar la reserva", "error");
+      // Si falló porque la reserva cambió de estado, la lista vieja no sirve.
+      void refetch(true);
     } finally {
       setBusyId(null);
     }
@@ -141,6 +175,7 @@ export function ReservasScreen() {
       setRejectingReserva(null);
     } catch (e) {
       addToast(e instanceof Error ? e.message : "No se pudo rechazar la reserva", "error");
+      void refetch(true);
     } finally {
       setBusyId(null);
     }
@@ -162,21 +197,20 @@ export function ReservasScreen() {
       setReopeningReserva(null);
     } catch (e) {
       addToast(e instanceof Error ? e.message : "No se pudo devolver la reserva a pendientes", "error");
+      void refetch(true);
     } finally {
       setBusyId(null);
     }
   };
 
-  const detalleAbierto = Boolean(selectedReserva);
+  const detalleAbierto = Boolean(reservaAbierta);
   /**
    * La reserva abierta está resolviendo una acción contra el servidor. Es lo que
    * enciende el spinner del botón que se apretó: antes las acciones solo se
    * apagaban y no había forma de distinguir "está enviando" de "se congeló".
+   * Qué botones hay lo decide el estado de la reserva (ver ReservaDetalle).
    */
-  const detalleBusy = Boolean(selectedReserva && busyId === selectedReserva.id);
-  const actionDisabled =
-    Boolean(selectedReserva && busyId === selectedReserva.id) ||
-    Boolean(selectedReserva && activeTab === "pendientes" && selectedReserva.status !== "pendiente");
+  const detalleBusy = Boolean(reservaAbierta && busyId === reservaAbierta.id);
 
   return (
     <AppShell hotelId={scopedHotelId}>
@@ -223,19 +257,19 @@ export function ReservasScreen() {
              scrollea por su cuenta. */
           <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto scrollbar-app xl:flex-row xl:gap-4 xl:overflow-hidden">
             <ReservaDetalle
-              reserva={selectedReserva}
-              processed={activeTab === "procesadas"}
-              actionDisabled={actionDisabled}
+              reserva={reservaAbierta}
+              actionDisabled={detalleBusy}
               busy={detalleBusy}
               onBack={() => setSelectedReserva(null)}
               onComplete={(item) => void handleComplete(item)}
               onCopy={(text) => void handleCopy(text)}
               onReject={setRejectingReserva}
               onReopen={setReopeningReserva}
+              onOpenReserva={handleOpenReserva}
             />
             {/* La `key` por reserva remonta el panel: así el chat vuelve a
                 arrancar plegado en el teléfono cada vez que se elige otra. */}
-            <ChatPanel key={selectedReserva?.id ?? "sin-reserva"} reserva={selectedReserva} />
+            <ChatPanel key={reservaAbierta?.id ?? "sin-reserva"} reserva={reservaAbierta} />
           </div>
         ) : (
           /* La lista es CONTENEDOR, así que va en crema: las `ReservaCard` de
@@ -248,6 +282,7 @@ export function ReservasScreen() {
               activeTab={activeTab}
               pendingCount={pendingCount}
               processedCount={procesadas.length}
+              archivedCount={archivadas.length}
               refreshing={refreshing}
               onChange={setActiveTab}
               onRefresh={handleRefresh}

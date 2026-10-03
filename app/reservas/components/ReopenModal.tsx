@@ -1,6 +1,7 @@
 "use client";
 
 import { Spinner } from "@/app/components/Spinner";
+import { esArchivada } from "@/lib/reservas-estado";
 import { formatCOT } from "../lib/formatters";
 import type { Reserva } from "../lib/types";
 
@@ -24,9 +25,14 @@ type Props = {
  * sin campo de texto: acá no hay motivo que registrar, solo hay que parar la
  * mano. El texto dice qué va a pasar y que se puede deshacer, para que la
  * confirmación no se lea como una advertencia de algo grave.
+ *
+ * Con una archivada (reemplazada o cancelada) el texto cambia y sí advierte:
+ * devolverla a pendientes revive una reserva vieja que el huésped ya cambió o
+ * canceló, y recepción podría subir al PMS algo que nadie quiere.
  */
 export function ReopenModal({ reserva, submitting, onClose, onConfirm }: Props) {
   if (!reserva) return null;
+  const archivada = esArchivada(reserva.status);
 
   return (
     <div
@@ -45,13 +51,37 @@ export function ReopenModal({ reserva, submitting, onClose, onConfirm }: Props) 
             {formatCOT(reserva.quote_request_id)}
           </span>
         </h2>
-        <p className="mt-2 text-[13px] leading-relaxed text-[var(--text-primary)]">
-          Vuelve a la pestaña <strong>Pendientes</strong> como si nadie la hubiera procesado. Si ya
-          la subiste al PMS, va a aparecer otra vez en la lista de trabajo.
-        </p>
-        <p className="mt-1.5 text-[13px] leading-relaxed text-[var(--text-secondary)]">
-          Se puede deshacer: desde Pendientes la marcas como procesada de nuevo.
-        </p>
+        {archivada ? (
+          <>
+            <p className="mt-2 text-[13px] leading-relaxed text-[var(--text-primary)]">
+              {reserva.status === "reemplazada" ? (
+                <>
+                  Esta reserva es <strong>vieja</strong>: el huésped pidió otra después y esa es la que
+                  vale. Si la devuelves a <strong>Pendientes</strong>, revives las fechas y datos que el
+                  huésped ya cambió.
+                </>
+              ) : (
+                <>
+                  El huésped <strong>canceló</strong> esta reserva. Si la devuelves a{" "}
+                  <strong>Pendientes</strong>, revives una reserva que el huésped ya no quiere.
+                </>
+              )}
+            </p>
+            <p className="mt-1.5 text-[13px] leading-relaxed text-[var(--text-secondary)]">
+              Hazlo solo si confirmaste con el huésped que la quiere de vuelta.
+            </p>
+          </>
+        ) : (
+          <>
+            <p className="mt-2 text-[13px] leading-relaxed text-[var(--text-primary)]">
+              Vuelve a la pestaña <strong>Pendientes</strong> como si nadie la hubiera procesado. Si
+              ya la subiste al PMS, va a aparecer otra vez en la lista de trabajo.
+            </p>
+            <p className="mt-1.5 text-[13px] leading-relaxed text-[var(--text-secondary)]">
+              Se puede deshacer: desde Pendientes la marcas como procesada de nuevo.
+            </p>
+          </>
+        )}
         <div className="mt-4 flex justify-end gap-2">
           <button
             type="button"
@@ -59,7 +89,7 @@ export function ReopenModal({ reserva, submitting, onClose, onConfirm }: Props) 
             disabled={submitting}
             className="ibx-press grotesk min-h-[42px] rounded-[var(--radius-chip)] border border-[var(--border-soft)] bg-[var(--bg-card)] px-4 text-[13.5px] font-semibold text-[var(--text-secondary)] hover:bg-[var(--bg-app)] disabled:cursor-not-allowed disabled:opacity-50"
           >
-            No, dejarla procesada
+            {archivada ? "No, dejarla archivada" : "No, dejarla procesada"}
           </button>
           <button
             type="button"
@@ -69,7 +99,11 @@ export function ReopenModal({ reserva, submitting, onClose, onConfirm }: Props) 
             className="ibx-press grotesk inline-flex min-h-[42px] items-center gap-2 rounded-[var(--radius-chip)] bg-[var(--accent)] px-4 text-[13.5px] font-bold text-white shadow-sm hover:bg-[var(--accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
           >
             {submitting && <Spinner className="h-4 w-4 animate-spin" />}
-            {submitting ? "Devolviendo…" : "Sí, devolver a pendientes"}
+            {submitting
+              ? "Devolviendo…"
+              : archivada
+                ? "Sí, revivirla en pendientes"
+                : "Sí, devolver a pendientes"}
           </button>
         </div>
       </div>

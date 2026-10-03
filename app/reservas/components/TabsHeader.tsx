@@ -8,6 +8,7 @@ type Props = {
   activeTab: ReservasTab;
   pendingCount: number;
   processedCount: number;
+  archivedCount: number;
   refreshing?: boolean;
   onChange: (tab: ReservasTab) => void;
   onRefresh?: () => void;
@@ -37,6 +38,7 @@ export function TabsHeader({
   activeTab,
   pendingCount,
   processedCount,
+  archivedCount,
   refreshing = false,
   onChange,
   onRefresh,
@@ -44,6 +46,9 @@ export function TabsHeader({
   const tabs: { id: ReservasTab; label: string; count: number }[] = [
     { id: "pendientes", label: "Pendientes", count: pendingCount },
     { id: "procesadas", label: "Procesadas", count: processedCount },
+    // Canceladas por el huésped y reemplazadas por una reserva más nueva: ya no
+    // son trabajo para el PMS, pero quedan a mano para consultarlas.
+    { id: "archivadas", label: "Archivadas", count: archivedCount },
   ];
 
   return (
@@ -93,7 +98,7 @@ export function TabsHeader({
               role="tab"
               aria-selected={active}
               onClick={() => onChange(tab.id)}
-              className={`ibx-press grotesk flex min-h-[40px] flex-1 items-center justify-center gap-1.5 rounded-[8px] px-3 text-[13px] font-semibold ${
+              className={`ibx-press grotesk flex min-h-[40px] min-w-0 flex-1 items-center justify-center gap-1.5 rounded-[8px] px-2 text-[13px] sm:px-3 font-semibold ${
                 active
                   ? "bg-[var(--bg-card)] text-[var(--accent)] shadow-sm"
                   : "text-[var(--text-secondary)] hover:bg-[var(--bg-card)]/60 hover:text-[var(--text-primary)]"

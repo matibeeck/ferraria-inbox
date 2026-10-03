@@ -3,11 +3,13 @@
 import type { ReactNode, SVGProps } from "react";
 import { Spinner } from "@/app/components/Spinner";
 import { avatarFlatColors, initials } from "@/lib/avatar";
+import { accionesPorEstado, presentacionEstado } from "@/lib/reservas-estado";
 import {
   SIN_DATO,
   buildOperaClipboardText,
   formatCOT,
   formatConteo,
+  formatFecha,
   formatFechaOpcional,
   formatHabitacionCorta,
   formatSiNo,
@@ -16,10 +18,10 @@ import {
   getQuoteTaxAmounts,
 } from "../lib/formatters";
 import type { Reserva } from "../lib/types";
+import { EstadoBadge } from "./EstadoBadge";
 
 type Props = {
   reserva: Reserva | null;
-  processed: boolean;
   actionDisabled: boolean;
   /**
    * Esta reserva está resolviendo una acción contra el servidor. Enciende el
@@ -32,6 +34,8 @@ type Props = {
   onCopy: (text: string) => void;
   onReject: (reserva: Reserva) => void;
   onReopen: (reserva: Reserva) => void;
+  /** Abre otra reserva en este mismo detalle (el enlace "Reemplazada por…"). */
+  onOpenReserva: (reserva: Reserva) => void;
 };
 
 function IconCheck(props: SVGProps<SVGSVGElement>) {
@@ -144,6 +148,90 @@ function StatCard({ label, value }: { label: string; value: string }) {
   );
 }
 
+/** "12 oct al 15 oct", o `null` si a la reserva nueva le falta alguna de las dos fechas. */
+function rangoFechas(reserva: Reserva): string | null {
+  const entrada = reserva.quote_requests?.fecha_entrada;
+  const salida = reserva.quote_requests?.fecha_salida;
+  if (!entrada || !salida) return null;
+  const desde = formatFecha(entrada, salida);
+  const hasta = formatFecha(salida, entrada);
+  if (desde === "—" || hasta === "—") return null;
+  return `${desde} al ${hasta}`;
+}
+
+/**
+ * Por qué una reserva archivada (o con un estado que el Inbox no conoce) no
+ * tiene los botones de siempre. En texto visible, no en un tooltip: si los
+ * botones desaparecen sin explicación se lee como que la pantalla se rompió.
+ */
+function AvisoEstado({
+  reserva,
+  onOpenReserva,
+}: {
+  reserva: Reserva;
+  onOpenReserva: (reserva: Reserva) => void;
+}) {
+  const { estado } = presentacionEstado(reserva.status);
+  const caja =
+    "rounded-[var(--radius-card)] border border-[var(--border-soft)] bg-[var(--bg-app)] px-4 py-3 text-[13px] leading-relaxed text-[var(--text-primary)]";
+  const detalle = "mt-1 text-[12.5px] text-[var(--text-secondary)]";
+
+  if (estado === "reemplazada") {
+    const nueva = reserva.reemplazo ?? null;
+    const fechas = nueva ? rangoFechas(nueva) : null;
+    return (
+      <div className={caja}>
+        <p className="font-semibold">
+          {nueva ? (
+            <>
+              Reemplazada por{" "}
+              <button
+                type="button"
+                onClick={() => onOpenReserva(nueva)}
+                className="font-semibold text-[var(--accent)] underline underline-offset-2 hover:text-[var(--accent-hover)]"
+              >
+                {fechas ? `la reserva del ${fechas}` : "la reserva nueva"}
+              </button>
+            </>
+          ) : (
+            "Reemplazada"
+          )}
+        </p>
+        <p className={detalle}>
+          El huésped pidió otra reserva en la misma conversación. Esta no hay que subirla al PMS.
+        </p>
+      </div>
+    );
+  }
+
+  if (estado === "cancelada") {
+    return (
+      <div className={caja}>
+        <p className="font-semibold">Cancelada</p>
+        <p className={detalle}>
+          {reserva.completed_at
+            ? "Se canceló después de procesarla: si ya está en el PMS, cancélala allá también."
+            : "Se canceló antes de procesarla: no hay que subirla al PMS."}
+        </p>
+      </div>
+    );
+  }
+
+  if (estado === null) {
+    return (
+      <div className={caja}>
+        <p className="font-semibold">Estado sin reconocer</p>
+        <p className={detalle}>
+          Esta reserva tiene un estado que el Inbox todavía no reconoce. Por ahora solo puedes copiar
+          sus datos.
+        </p>
+      </div>
+    );
+  }
+
+  return null;
+}
+
 /**
  * Detalle de la reserva seleccionada (docs/REDESIGN.md §6.4 y §6.5).
  *
@@ -153,7 +241,6 @@ function StatCard({ label, value }: { label: string; value: string }) {
  */
 export function ReservaDetalle({
   reserva,
-  processed,
   actionDisabled,
   busy = false,
   onBack,
@@ -161,6 +248,7 @@ export function ReservaDetalle({
   onCopy,
   onReject,
   onReopen,
+  onOpenReserva,
 }: Props) {
   // Sin reserva no hay nada que mostrar: el detalle ya no es una columna fija
   // al lado de la lista, se abre encima de ella y solo existe mientras haya una
@@ -171,6 +259,10 @@ export function ReservaDetalle({
   const nombre = reserva.titular_nombre || "Titular sin nombre";
   const avatar = avatarFlatColors(reserva.id);
   const { subtotalBeforeIva, ivaAmount, totalAmount } = getQuoteTaxAmounts(quote);
+
+  // Los botones salen del estado real de la fila, no de la pestaña: una
+  // reemplazada o cancelada no se completa ni se rechaza esté donde esté.
+  const acciones = accionesPorEstado(reserva.status);
 
   const desayuno = quote?.breakfast_included == null ? SIN_DATO : formatSiNo(quote.breakfast_included);
   const mascotas = quote?.pets == null ? SIN_DATO : formatSiNo(quote.pets);
@@ -208,7 +300,8 @@ export function ReservaDetalle({
               {reserva.cedula || SIN_DATO} · {reserva.correo || SIN_DATO}
             </p>
           </div>
-          <div className="flex shrink-0 items-center gap-2.5">
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-2.5">
+            <EstadoBadge status={reserva.status} />
             <span className="ibx-mono rounded-full bg-[var(--red-soft)] px-2.5 py-1 text-[11px] font-semibold text-[var(--accent)]">
               {formatCOT(reserva.quote_request_id)}
             </span>
@@ -259,11 +352,13 @@ export function ReservaDetalle({
         </p>
       ) : null}
 
+      <AvisoEstado reserva={reserva} onOpenReserva={onOpenReserva} />
+
       <div className="flex flex-wrap items-center gap-2 pb-1">
         {/* Acción principal de cada pestaña: es la que lleva el spinner. Mientras
             resuelve cambia también la palabra ("Completando…"), porque un icono
             que gira sin texto no dice qué está pasando. */}
-        {!processed && (
+        {acciones.completar && (
           <button
             type="button"
             onClick={() => onComplete(reserva)}
@@ -302,7 +397,7 @@ export function ReservaDetalle({
             hecho: el clic equivocado devolvía a pendientes una reserva ya
             subida al PMS. Tampoco lleva spinner, porque el estado del envío se
             lee dentro de la confirmación. */}
-        {processed && (
+        {acciones.volverAPendientes && (
           <button
             type="button"
             onClick={() => onReopen(reserva)}
@@ -315,7 +410,7 @@ export function ReservaDetalle({
         )}
         {/* Rechazar no lleva spinner: abre el diálogo de motivo, y el estado del
             envío se lee ahí adentro, que es donde está mirando la recepcionista. */}
-        {!processed && (
+        {acciones.rechazar && (
           <button
             type="button"
             onClick={() => onReject(reserva)}

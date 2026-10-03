@@ -10,44 +10,14 @@ import {
   formatTotalOpcional,
   getQuoteTaxAmounts,
 } from "../lib/formatters";
-import type { Reserva, ReservaStatus } from "../lib/types";
+import type { Reserva } from "../lib/types";
+import { EstadoBadge } from "./EstadoBadge";
 
 type Props = {
   reserva: Reserva;
   selected: boolean;
   onSelect: (reserva: Reserva) => void;
 };
-
-/**
- * Estado real de la reserva, siempre a la vista y en texto.
- *
- * No depende de la pestaña abierta: recepción trabaja desde tablets, donde no
- * hay hover, y necesita saber de un vistazo si la reserva ya está en el PMS
- * sin abrir el detalle ni fijarse en qué pestaña está parada.
- */
-function EstadoBadge({ status }: { status: ReservaStatus }) {
-  const estilos: Record<ReservaStatus, { label: string; className: string }> = {
-    pendiente: {
-      label: "Pendiente",
-      className: "bg-[var(--gold-soft)] text-[var(--gold)]",
-    },
-    completada: {
-      label: "Procesada",
-      className: "bg-[var(--success-bg)] text-[var(--success-text)]",
-    },
-    rechazada: {
-      label: "Rechazada",
-      className: "bg-[var(--red-soft)] text-[var(--accent)]",
-    },
-  };
-  const { label, className } = estilos[status];
-
-  return (
-    <span className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold ${className}`}>
-      {label}
-    </span>
-  );
-}
 
 /**
  * Un dato de la card: la etiqueta arriba y el valor debajo.

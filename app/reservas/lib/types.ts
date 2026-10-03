@@ -1,5 +1,7 @@
-export type ReservaStatus = "pendiente" | "completada" | "rechazada";
-export type ReservasTab = "pendientes" | "procesadas";
+import type { ReservaStatus } from "@/lib/reservas-estado";
+
+export type { ReservaStatus };
+export type ReservasTab = "pendientes" | "procesadas" | "archivadas";
 
 export type ReservaQuoteRequest = {
   id: string;
@@ -29,12 +31,24 @@ export type Reserva = {
   cedula: string;
   correo: string;
   notas: string | null;
-  status: ReservaStatus;
+  /**
+   * Lo escriben el Inbox y el engine: puede llegar un valor que este código no
+   * conoce. Se pinta siempre con `presentacionEstado`, que no revienta.
+   */
+  status: ReservaStatus | (string & {});
   rejection_reason: string | null;
   created_at: string;
   completed_at: string | null;
   processed_by: string | null;
   quote_requests: ReservaQuoteRequest | null;
+  /** Solo en reemplazadas, y solo cuando el engine ya la escribió. */
+  replaced_by?: string | null;
+  /**
+   * La reserva que reemplazó a esta, resuelta en el servidor y SOLO si es del
+   * mismo hotel. `null`: no existe o no es de este hotel → "Reemplazada" sin
+   * enlace. Solo viene en la pestaña Archivadas.
+   */
+  reemplazo?: Reserva | null;
 };
 
 export type ReservasAvailableHotel = {
