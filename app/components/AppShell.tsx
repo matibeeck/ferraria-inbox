@@ -1,6 +1,8 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
+import posthog from "posthog-js";
+import { createClient } from "@/lib/supabase/client";
 import { AppSidebar, type AppSidebarProps } from "./AppSidebar";
 
 export type AppShellProps = AppSidebarProps & {
@@ -19,6 +21,22 @@ export type AppShellProps = AppSidebarProps & {
  * la barra no le quede encima al composer ni a la última tarjeta de la lista.
  */
 export function AppShell({ children, hideMobileNav = false, ...sidebarProps }: AppShellProps) {
+  const activeHotelId = sidebarProps.hotelId ?? null;
+
+  // Solo el id del usuario del staff: nada de email ni teléfono en PostHog.
+  // El grupo sigue al hotel activo, así un cambio de hotel reasigna los eventos.
+  useEffect(() => {
+    if (!process.env.NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN || !process.env.NEXT_PUBLIC_POSTHOG_HOST) return;
+
+    const supabase = createClient();
+    void supabase.auth.getSession().then(({ data: { session } }) => {
+      const userId = session?.user.id;
+      if (!userId) return;
+      if (posthog.get_distinct_id() !== userId) posthog.identify(userId);
+      if (activeHotelId) posthog.group("hotel", activeHotelId);
+    });
+  }, [activeHotelId]);
+
   return (
     <div
       className="flex h-[100dvh] max-h-[100dvh] w-full max-w-full overflow-hidden"

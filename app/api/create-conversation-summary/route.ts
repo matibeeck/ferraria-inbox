@@ -1,9 +1,12 @@
-import { NextResponse } from "next/server";
+import { randomUUID } from "node:crypto";
+import { after, NextResponse } from "next/server";
 import { apiError, isDev } from "@/lib/api-error";
 import { requireSessionUser } from "@/lib/auth/require-user";
 import { requireCapability } from "@/lib/auth/require-capability";
 import { assertConversationInHotel } from "@/lib/auth/require-hotel";
 import { getSupabaseServerClient } from "@/lib/supabase-server";
+import { captureConversationSummaryGeneration } from "@/lib/posthog-ai";
+import { emitPostHogSummaryLog, flushPostHogLogs } from "@/instrumentation";
 
 export const dynamic = "force-dynamic";
 
@@ -63,6 +66,11 @@ export async function POST(request: Request) {
       );
     }
 
+    const traceId = randomUUID();
+    const startedAt = Date.now();
+    emitPostHogSummaryLog("conversation summary generation requested", {
+      operation: "conversation_summary_generation",
+    });
     const res = await fetch(engineUrl, {
       method: "POST",
       headers: {
@@ -78,13 +86,36 @@ export async function POST(request: Request) {
       console.error("[create-conversation-summary] engine", res.status, isDev ? text : "");
     }
 
+    const summary = res.ok ? readEngineSummary(text) : null;
+    const latencyMs = Date.now() - startedAt;
+    emitPostHogSummaryLog("conversation summary generation completed", {
+      operation: "conversation_summary_generation",
+      http_status_code: res.status,
+      duration_ms: latencyMs,
+      summary_available: summary !== null,
+    });
+    // PostHog se manda después de responder: el botón de resumen no espera a
+    // que PostHog conteste.
+    after(async () => {
+      await captureConversationSummaryGeneration({
+        distinctId: auth.user.id,
+        conversationId: conversation_id,
+        hotelId: ownership.hotelId,
+        traceId,
+        summaryAvailable: summary !== null,
+        httpStatus: res.status,
+        latencyMs,
+      });
+      await flushPostHogLogs();
+    });
+
     // El engine devuelve el resumen en el body; si no viene, el cliente cae a
     // leer `conversation_summaries` (compatibilidad con rollback a n8n).
     return NextResponse.json({
       ok: true,
       engineOk: res.ok,
       engineStatus: res.status,
-      summary: res.ok ? readEngineSummary(text) : null,
+      summary,
     });
   } catch (e) {
     return apiError(500, "unexpected_error", { cause: e, log: "[create-conversation-summary]", message: "No se pudo generar el resumen" });

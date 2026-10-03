@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useState } from "react";
+import posthog from "posthog-js";
 
 type FeedbackModalProps = {
   open: boolean;
@@ -65,6 +66,12 @@ export function FeedbackModal({ open, activeHotelId, onClose, onSuccess }: Feedb
       if (!res.ok) {
         setError(j.error ?? "No se pudo enviar el feedback");
         return;
+      }
+      if (process.env.NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN && process.env.NEXT_PUBLIC_POSTHOG_HOST) {
+        posthog.capture("feedback_submitted", {
+          category,
+          has_rating: rating !== null,
+        });
       }
       reset();
       onSuccess();

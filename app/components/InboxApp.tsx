@@ -3,6 +3,7 @@
 import type { ClipboardEvent, SVGProps } from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import posthog from "posthog-js";
 import { avatarFlatColors, initials, splitLeadingEmoji } from "@/lib/avatar";
 import {
   applyConversationRowPatch,
@@ -4078,6 +4079,12 @@ export default function InboxApp() {
           )
         );
 
+        if (process.env.NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN && process.env.NEXT_PUBLIC_POSTHOG_HOST) {
+          posthog.capture("human_message_sent", {
+            content_type: selectedFileIsPdf ? "document" : "image",
+            has_caption: Boolean(text),
+          });
+        }
         setDraft("");
         clearSelectedFile();
         // Sin refetch, igual que el camino de texto: la route ya no escribe en la
@@ -4250,6 +4257,12 @@ export default function InboxApp() {
         messageId: j.messageId,
         wamid: j.whatsappMessageId ?? null,
       });
+      if (process.env.NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN && process.env.NEXT_PUBLIC_POSTHOG_HOST) {
+        posthog.capture("human_message_sent", {
+          content_type: "text",
+          translated: outgoingLang !== DEFAULT_COMPOSER_LANGUAGE,
+        });
+      }
       // Meta puede aceptar el mensaje y rechazarlo después (131026 "Message
       // Undeliverable"): la burbuja queda en ✓ y solo el acuse posterior la
       // mueve a ✓✓ o la marca como no entregada.

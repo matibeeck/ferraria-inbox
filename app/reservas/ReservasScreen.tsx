@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import posthog from "posthog-js";
 import { readStoredActiveHotelId, writeStoredActiveHotelId } from "@/lib/active-hotel-storage";
 import { normalizePhoneDigits } from "@/lib/chat-utils";
 import { AppShell } from "@/app/components/AppShell";
@@ -106,6 +107,9 @@ export function ReservasScreen() {
     setBusyId(reserva.id);
     try {
       await completeReserva(reserva.id);
+      if (process.env.NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN && process.env.NEXT_PUBLIC_POSTHOG_HOST) {
+        posthog.capture("reservation_completed");
+      }
       if (selectedReserva?.id === reserva.id) setSelectedReserva(null);
       addToast(`Reserva ${formatCOT(reserva.quote_request_id)} marcada como procesada`);
     } catch (e) {
@@ -129,6 +133,9 @@ export function ReservasScreen() {
     setBusyId(rejectingReserva.id);
     try {
       await rejectReserva(rejectingReserva.id, reason);
+      if (process.env.NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN && process.env.NEXT_PUBLIC_POSTHOG_HOST) {
+        posthog.capture("reservation_rejected");
+      }
       if (selectedReserva?.id === rejectingReserva.id) setSelectedReserva(null);
       addToast(`Reserva ${formatCOT(rejectingReserva.quote_request_id)} rechazada`);
       setRejectingReserva(null);
@@ -145,6 +152,9 @@ export function ReservasScreen() {
     setBusyId(reserva.id);
     try {
       await reopenReserva(reserva.id);
+      if (process.env.NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN && process.env.NEXT_PUBLIC_POSTHOG_HOST) {
+        posthog.capture("reservation_reopened");
+      }
       // La reserva salta a "Pendientes": dejarla seleccionada mostraría un
       // detalle que ya no corresponde a ninguna tarjeta de la lista visible.
       if (selectedReserva?.id === reserva.id) setSelectedReserva(null);

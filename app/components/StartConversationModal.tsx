@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import posthog from "posthog-js";
 import { sendWhatsappTemplate } from "@/lib/send-whatsapp-template";
 import type { MessageTemplate } from "@/lib/message-templates";
 import { normalizeColombianWhatsappNumber } from "@/lib/whatsapp-templates";
@@ -146,6 +147,11 @@ export function StartConversationModal({
         activeHotelId: hotelId,
         ...(selectedTemplate.variables.length > 0 ? { variables } : {}),
       });
+      if (process.env.NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN && process.env.NEXT_PUBLIC_POSTHOG_HOST) {
+        posthog.capture("whatsapp_template_sent", {
+          has_template_variables: selectedTemplate.variables.length > 0,
+        });
+      }
       setPhone("");
       setTemplateVariables({});
       onSuccess();

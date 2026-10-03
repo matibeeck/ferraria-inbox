@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import posthog from "posthog-js";
 import { createClient } from "@/lib/supabase/client";
 import { writeStoredActiveHotelId } from "@/lib/active-hotel-storage";
 import { HEADER_MENU_ROW_CLASS } from "./HeaderMobileMenu";
@@ -23,6 +24,10 @@ export function LogoutButton({
     writeStoredActiveHotelId(null);
     const supabase = createClient();
     await supabase.auth.signOut();
+    if (process.env.NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN && process.env.NEXT_PUBLIC_POSTHOG_HOST) {
+      posthog.capture("user_logged_out");
+      posthog.reset();
+    }
     router.push("/login");
     router.refresh();
     setLoading(false);

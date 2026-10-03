@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
+import posthog from "posthog-js";
 import { formatStaffPhone, type StaffContact } from "@/lib/staff-contacts";
 
 /**
@@ -148,6 +149,11 @@ export function StaffContactsModal({ open, activeHotelId, onClose }: StaffContac
         throw new Error(json.error ?? "No se pudo guardar el contacto");
       }
       upsertLocal(json.contact);
+      if (process.env.NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN && process.env.NEXT_PUBLIC_POSTHOG_HOST) {
+        posthog.capture("staff_contact_created", {
+          has_role: Boolean(role.trim()),
+        });
+      }
       setName("");
       setPhone("");
       setRole("");
@@ -181,6 +187,11 @@ export function StaffContactsModal({ open, activeHotelId, onClose }: StaffContac
         throw new Error(json.error ?? "No se pudo actualizar el contacto");
       }
       upsertLocal(json.contact);
+      if (process.env.NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN && process.env.NEXT_PUBLIC_POSTHOG_HOST) {
+        posthog.capture("staff_contact_updated", {
+          change_type: payload.isActive === undefined ? "details" : "active_status",
+        });
+      }
       setEditingId(null);
       setNotice(successMessage);
     } catch (e) {

@@ -2,6 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
+import posthog from "posthog-js";
 import { createClient } from "@/lib/supabase/client";
 import { BrandHeaderMark } from "../components/BrandHeaderMark";
 
@@ -39,7 +40,10 @@ export function LoginForm() {
 
     try {
       const supabase = createClient();
-      const { error: signError } = await supabase.auth.signInWithPassword({
+      const {
+        data: { user },
+        error: signError,
+      } = await supabase.auth.signInWithPassword({
         email: email.trim(),
         password,
       });
@@ -48,6 +52,11 @@ export function LoginForm() {
         setLoading(false);
         setError(mapAuthError(signError.message));
         return;
+      }
+
+      if (user && process.env.NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN && process.env.NEXT_PUBLIC_POSTHOG_HOST) {
+        posthog.identify(user.id);
+        posthog.capture("user_logged_in");
       }
 
       // Éxito: NO llamamos setLoading(false) a propósito. Dejamos loading=true

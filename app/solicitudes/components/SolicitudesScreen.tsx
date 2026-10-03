@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
+import posthog from "posthog-js";
 import { AppShell } from "@/app/components/AppShell";
 import { readStoredActiveHotelId, writeStoredActiveHotelId } from "@/lib/active-hotel-storage";
 import { mensajeAvisoParaRecepcion } from "@/lib/aviso-cierre";
@@ -143,6 +144,11 @@ export function SolicitudesScreen() {
     setOcupadoId(ticket.id);
     try {
       const aviso = await cambiarEstado(ticket.id, nuevoEstado);
+      if (process.env.NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN && process.env.NEXT_PUBLIC_POSTHOG_HOST) {
+        posthog.capture("service_ticket_status_changed", {
+          status: nuevoEstado,
+        });
+      }
       if (nuevoEstado === "en_curso") avisar("Solicitud tomada");
       if (nuevoEstado === "resuelto") {
         // El cierre ya quedó guardado pase lo que pase con el aviso; por eso el
