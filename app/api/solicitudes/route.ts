@@ -318,6 +318,14 @@ export async function PATCH(request: Request) {
         hotelId,
         engineEnabled,
       });
+      // Rastro del resultado en el log del servidor: sin esto, un "no se avisó"
+      // solo existe en el toast de quien tocó el botón. Solo id y motivo: nada
+      // del huésped ni del mensaje.
+      console.info("[aviso-cierre]", {
+        ticket_id: actualizada.id,
+        enviado: resultado.aviso.enviado,
+        motivo: resultado.aviso.motivo ?? null,
+      });
       // Igual que con `conversation_id`: quien no ve datos de huéspedes no se
       // entera por el motivo de si recepción ya le escribió o cuándo escribió.
       aviso = avisoVisiblePara(resultado.aviso, puedeVerConversaciones);

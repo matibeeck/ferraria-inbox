@@ -167,6 +167,28 @@ test("zona horaria: ticket con offset y Wubby sin zona en el mismo instante no c
   assert.equal(d?.enviar, true);
 });
 
+test("caso Tigo 2026-10-03: el Human Answer de las 11:02 Bogotá es POSTERIOR a tickets de las 16:00Z", () => {
+  // Datos reales: tickets creados a las 16:00:25Z y 16:01:59Z; recepción le
+  // escribió a las 11:02:21 hora Bogotá (16:02:21Z), 22 s después del segundo.
+  // Leído como "11:02 < 16:00" parece anterior, y no lo es. Resueltos a las
+  // 11:40Z del día siguiente con el huésped dentro de la ventana de 24 h.
+  const base = {
+    ultimoHumanoSalienteAt: "2026-10-02T11:02:21.81701",
+    ultimoEntranteColumnaAt: "2026-10-03T01:14:55+00:00",
+    ultimoEntranteHiloAt: "2026-10-02T20:14:55.751365",
+    ahoraMs: Date.parse("2026-10-03T11:40:56.815Z"),
+  };
+  for (const created_at of ["2026-10-02T16:01:59.592536+00:00", "2026-10-02T16:00:25.847246+00:00"]) {
+    const d = decidirAvisoCierre(entrada({ ...base, ticket: { ...entrada().ticket, created_at } }));
+    assert.deepEqual(d, { enviar: false, motivo: "ya_le_escribieron" }, created_at);
+  }
+  // Sin ese mensaje de recepción, los mismos tickets SÍ avisan: la ventana estaba abierta.
+  const sinHumano = decidirAvisoCierre(
+    entrada({ ...base, ultimoHumanoSalienteAt: null, ticket: { ...entrada().ticket, created_at: "2026-10-02T16:01:59.592536+00:00" } })
+  );
+  assert.equal(sinHumano?.enviar, true);
+});
+
 test("fuera_de_ventana: último entrante hace más de 24 h", () => {
   const ahoraMs = Date.parse("2026-10-01T16:00:00Z");
   const d = decidirAvisoCierre(
