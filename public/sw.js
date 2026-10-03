@@ -100,13 +100,22 @@ self.addEventListener("push", (event) => {
     // escalamiento sin leer de esa misma conversación.
     // Los tickets colapsan por ticket_id, no por conversación: dos solicitudes
     // distintas del mismo huésped son dos cosas que alguien tiene que atender.
+    // Las reservas colapsan por conversación Y título: el engine manda en el
+    // mismo turno "Cambio sobre reserva procesada" y enseguida "Nueva reserva"
+    // de la misma conversación, y con el tag solo por conversación la segunda
+    // reemplazaba a la primera — recepción nunca veía el aviso de que tenía
+    // que tocar una reserva ya subida al PMS. Avisos de distinto título
+    // (nueva, cambio, corrección, cancelación) conviven; el mismo repetido se
+    // sigue juntando en uno.
     tag:
       tipo === "ticket"
         ? ticketId
           ? `${estilo.tagPrefijo}-${ticketId}`
           : undefined
         : conversationId
-          ? `${estilo.tagPrefijo}-${conversationId}`
+          ? tipo === "reservation"
+            ? `${estilo.tagPrefijo}-${conversationId}-${rawTitle}`
+            : `${estilo.tagPrefijo}-${conversationId}`
           : undefined,
     data: {
       conversation_id: conversationId,
